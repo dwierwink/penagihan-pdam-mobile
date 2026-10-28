@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build-android-apk:
-    name: Build Android APK (Penagihan PDAM)
+    name: Build Android Release APK (Penagihan PDAM)
     runs-on: ubuntu-latest
     steps:
       - name: 📥 Checkout repository
@@ -48,14 +48,14 @@ jobs:
       - name: 🔑 Set gradlew execution permissions
         run: chmod +x android/gradlew
 
-      - name: 🔨 Build Android APK (Debug with Auto-Sign)
+      - name: 🔨 Build Standalone Release APK (Offline with Embedded JS Bundle)
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: 📋 Rename and Stage APK
         run: |
           mkdir -p build-output
-          cp android/app/build/outputs/apk/debug/app-debug.apk build-output/Penagihan-PDAM.apk
+          cp android/app/build/outputs/apk/release/app-release.apk build-output/Penagihan-PDAM.apk
 
       - name: 📤 Upload Android APK Artifact
         uses: actions/upload-artifact@v4
