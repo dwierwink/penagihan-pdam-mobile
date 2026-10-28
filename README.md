@@ -7,7 +7,7 @@ Aplikasi mobile penagihan PDAM yang dirancang untuk petugas lapangan, dilengkapi
 - **Master Database Pelanggan**:
   - Tambah data pelanggan manual dengan format otomatis Nomor SMB (`xx-xxxxx`).
   - Import file Excel data pelanggan (No. SMB, Nama, Alamat, Latitude, Longitude).
-  - Mode seleksi: ceklis satuan dan ceklis semua untuk penghapusan data secara kolektif.
+  - Mode seleksi: ceklist satuan dan ceklist semua untuk penghapusan data secara kolektif.
   - Pencarian instan berdasarkan nama, alamat, atau nomor sambungan.
 
 - **Daftar Tagihan & Periode**:
