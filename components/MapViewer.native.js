@@ -5,10 +5,19 @@ import { getMapHtml } from './generateMapHtml';
 
 export default function MapViewer({ style, userLocation, customers = [] }) {
   const webViewRef = useRef(null);
+  const isLoadedRef = useRef(false);
+
+  // Simpan HTML awal dalam ref agar WebView TIDAK PERNAH me-reload saat koordinat GPS terupdate
+  const initialCoordsRef = useRef(userLocation);
+  const initialCustomersRef = useRef(customers);
+  const htmlRef = useRef(null);
+  if (!htmlRef.current) {
+    htmlRef.current = getMapHtml(initialCoordsRef.current, initialCustomersRef.current);
+  }
 
   const sendLocationToWebView = (loc) => {
     if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number') return;
-    if (webViewRef.current) {
+    if (webViewRef.current && isLoadedRef.current) {
       const jsCode = `
         if (typeof window.handleLocationUpdate === 'function') {
           window.handleLocationUpdate(${loc.lat}, ${loc.lng}, ${loc.accuracy || 10});
@@ -20,7 +29,7 @@ export default function MapViewer({ style, userLocation, customers = [] }) {
   };
 
   const sendCustomersToWebView = (custList) => {
-    if (webViewRef.current) {
+    if (webViewRef.current && isLoadedRef.current) {
       const jsonStr = JSON.stringify(custList || []);
       const jsCode = `
         if (typeof window.updateCustomersData === 'function') {
@@ -40,25 +49,24 @@ export default function MapViewer({ style, userLocation, customers = [] }) {
     sendCustomersToWebView(customers);
   }, [customers]);
 
-  const html = getMapHtml(userLocation, customers);
-
   return (
     <View style={[styles.container, style]}>
       <WebView
         ref={webViewRef}
         originWhitelist={['*']}
-        source={{ html }}
+        source={{ html: htmlRef.current }}
         style={styles.webView}
         javaScriptEnabled={true}
         domStorageEnabled={true}
         geolocationEnabled={true}
         startInLoadingState={true}
         onLoadEnd={() => {
+          isLoadedRef.current = true;
           if (userLocation) {
-            setTimeout(() => sendLocationToWebView(userLocation), 600);
+            setTimeout(() => sendLocationToWebView(userLocation), 400);
           }
           if (customers && customers.length > 0) {
-            setTimeout(() => sendCustomersToWebView(customers), 700);
+            setTimeout(() => sendCustomersToWebView(customers), 600);
           }
         }}
         renderLoading={() => (

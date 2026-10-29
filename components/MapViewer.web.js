@@ -4,10 +4,19 @@ import { getMapHtml } from './generateMapHtml';
 
 export default function MapViewer({ style, userLocation, customers = [] }) {
   const iframeRef = useRef(null);
+  const isLoadedRef = useRef(false);
+
+  // Simpan HTML awal dalam ref agar iframe TIDAK PERNAH me-reload saat koordinat GPS terupdate
+  const initialCoordsRef = useRef(userLocation);
+  const initialCustomersRef = useRef(customers);
+  const htmlRef = useRef(null);
+  if (!htmlRef.current) {
+    htmlRef.current = getMapHtml(initialCoordsRef.current, initialCustomersRef.current);
+  }
 
   const sendLocationToIframe = (loc) => {
     if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number') return;
-    if (iframeRef.current && iframeRef.current.contentWindow) {
+    if (iframeRef.current && iframeRef.current.contentWindow && isLoadedRef.current) {
       const msg = JSON.stringify({
         type: 'UPDATE_LOCATION',
         lat: loc.lat,
@@ -23,7 +32,7 @@ export default function MapViewer({ style, userLocation, customers = [] }) {
   };
 
   const sendCustomersToIframe = (custList) => {
-    if (iframeRef.current && iframeRef.current.contentWindow) {
+    if (iframeRef.current && iframeRef.current.contentWindow && isLoadedRef.current) {
       const msg = JSON.stringify({
         type: 'UPDATE_CUSTOMERS',
         customers: custList || [],
@@ -44,14 +53,12 @@ export default function MapViewer({ style, userLocation, customers = [] }) {
     sendCustomersToIframe(customers);
   }, [customers]);
 
-  const html = getMapHtml(userLocation, customers);
-
   return (
     <View style={[styles.container, style]}>
       <iframe
         ref={iframeRef}
         title="Google Maps Rute Tagihan PDAM"
-        srcDoc={html}
+        srcDoc={htmlRef.current}
         style={{
           width: '100%',
           height: '100%',
@@ -60,8 +67,9 @@ export default function MapViewer({ style, userLocation, customers = [] }) {
         }}
         allow="geolocation *"
         onLoad={() => {
+          isLoadedRef.current = true;
           if (userLocation) {
-            setTimeout(() => sendLocationToIframe(userLocation), 500);
+            setTimeout(() => sendLocationToIframe(userLocation), 400);
           }
           if (customers && customers.length > 0) {
             setTimeout(() => sendCustomersToIframe(customers), 600);

@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
   View,
   ScrollView,
+  FlatList,
   TouchableOpacity,
   Platform,
   Modal,
@@ -75,11 +76,23 @@ const parseCustomerCoords = (item) => {
 const findColumnValue = (row, possibleNames) => {
   if (!row || typeof row !== 'object') return null;
   const keys = Object.keys(row);
+  // 1. Cek kecocokan persis (exact match)
   for (const name of possibleNames) {
     const target = name.toLowerCase().replace(/[^a-z0-9]/g, '');
     for (const key of keys) {
       const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
       if (normalizedKey === target) {
+        return row[key];
+      }
+    }
+  }
+  // 2. Cek kecocokan sebagian (partial match)
+  for (const name of possibleNames) {
+    const target = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (target.length < 3) continue;
+    for (const key of keys) {
+      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (normalizedKey.includes(target) || target.includes(normalizedKey)) {
         return row[key];
       }
     }
@@ -111,11 +124,233 @@ const formatDistanceText = (distKm) => {
   return `${distKm.toFixed(1)} km`;
 };
 
-// Direktori penyimpanan permanen foto persil di dalam memori/penyimpanan HP
-const PERSIL_STORAGE_DIR =
+// ============================================================================
+// STRUKTUR PENYIMPANAN INTERNAL HP (Head Folder & Subfolder Masing-Masing)
+// ============================================================================
+// 1. Head Folder: FileSystem.documentDirectory + 'PenagihanPDAM/'
+// 2. Subfolder Database: .../PenagihanPDAM/database/
+//    - pelanggan.json    : Master data pelanggan permanen
+//    - tagihan.json      : Riwayat tagihan per periode
+//    - cache_foto.json   : Pemetaan cache foto persil lintas periode
+// 3. Subfolder Foto Persil: .../PenagihanPDAM/foto_persil/
+//    - foto_persil_*.jpg : File fisik foto persil terkompresi <= 300KB
+// ============================================================================
+
+const HEAD_STORAGE_DIR =
+  Platform.OS !== 'web' && FileSystem && FileSystem.documentDirectory
+    ? `${FileSystem.documentDirectory}PenagihanPDAM/`
+    : null;
+
+const DATABASE_STORAGE_DIR = HEAD_STORAGE_DIR
+  ? `${HEAD_STORAGE_DIR}database/`
+  : null;
+
+const PERSIL_STORAGE_DIR = HEAD_STORAGE_DIR
+  ? `${HEAD_STORAGE_DIR}foto_persil/`
+  : null;
+
+const OLD_PERSIL_DIR =
   Platform.OS !== 'web' && FileSystem && FileSystem.documentDirectory
     ? `${FileSystem.documentDirectory}foto_persil/`
     : null;
+
+const PELANGGAN_DB_FILE = DATABASE_STORAGE_DIR
+  ? `${DATABASE_STORAGE_DIR}pelanggan.json`
+  : null;
+
+const TAGIHAN_DB_FILE = DATABASE_STORAGE_DIR
+  ? `${DATABASE_STORAGE_DIR}tagihan.json`
+  : null;
+
+const FOTO_CACHE_DB_FILE = DATABASE_STORAGE_DIR
+  ? `${DATABASE_STORAGE_DIR}cache_foto.json`
+  : null;
+
+// Pastikan folder internal tersedia
+const ensureDirectoryExists = async (dirPath) => {
+  if (!dirPath || Platform.OS === 'web' || !FileSystem) return;
+  try {
+    const dirInfo = await FileSystem.getInfoAsync(dirPath);
+    if (!dirInfo.exists) {
+      await FileSystem.makeDirectoryAsync(dirPath, { intermediates: true });
+    }
+  } catch (err) {
+    console.warn(`Gagal membuat folder ${dirPath}:`, err);
+  }
+};
+
+// Inisialisasi Head Folder & Subfolder internal perangkat HP
+const initStorageDirectories = async () => {
+  if (Platform.OS === 'web' || !FileSystem || !HEAD_STORAGE_DIR) return;
+  try {
+    await ensureDirectoryExists(HEAD_STORAGE_DIR);
+    await ensureDirectoryExists(DATABASE_STORAGE_DIR);
+    await ensureDirectoryExists(PERSIL_STORAGE_DIR);
+
+    // Migrasi file foto dari direktori lama jika sebelumnya pernah tersimpan di root foto_persil/
+    if (OLD_PERSIL_DIR) {
+      try {
+        const oldInfo = await FileSystem.getInfoAsync(OLD_PERSIL_DIR);
+        if (oldInfo.exists && oldInfo.isDirectory) {
+          const files = await FileSystem.readDirectoryAsync(OLD_PERSIL_DIR);
+          for (const file of files) {
+            const oldPath = `${OLD_PERSIL_DIR}${file}`;
+            const newPath = `${PERSIL_STORAGE_DIR}${file}`;
+            const newInfo = await FileSystem.getInfoAsync(newPath);
+            if (!newInfo.exists) {
+              await FileSystem.copyAsync({ from: oldPath, to: newPath });
+            }
+          }
+        }
+      } catch (migErr) {
+        // Abaikan error migrasi opsional
+      }
+    }
+  } catch (err) {
+    console.warn('Gagal inisialisasi folder internal:', err);
+  }
+};
+
+// 1. Simpan Master Database Data Pelanggan ke Penyimpanan Internal HP
+const savePelangganToInternalStorage = async (data) => {
+  try {
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('PDAM_MASTER_PELANGGAN_DB', JSON.stringify(data));
+      }
+      return;
+    }
+    if (!PELANGGAN_DB_FILE || !FileSystem) return;
+    await ensureDirectoryExists(DATABASE_STORAGE_DIR);
+    await FileSystem.writeAsStringAsync(PELANGGAN_DB_FILE, JSON.stringify(data), {
+      encoding: FileSystem.EncodingType.UTF8,
+    });
+  } catch (err) {
+    console.warn('Gagal menyimpan master database pelanggan:', err);
+  }
+};
+
+// 2. Baca Master Database Data Pelanggan dari Penyimpanan Internal HP
+const loadPelangganFromInternalStorage = async () => {
+  try {
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const raw = window.localStorage.getItem('PDAM_MASTER_PELANGGAN_DB');
+        if (raw) return JSON.parse(raw);
+      }
+      return [];
+    }
+    if (!PELANGGAN_DB_FILE || !FileSystem) return [];
+    await ensureDirectoryExists(DATABASE_STORAGE_DIR);
+    const info = await FileSystem.getInfoAsync(PELANGGAN_DB_FILE);
+    if (info.exists) {
+      const content = await FileSystem.readAsStringAsync(PELANGGAN_DB_FILE, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      if (content) {
+        const parsed = JSON.parse(content);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Gagal membaca master database pelanggan:', err);
+  }
+  return [];
+};
+
+// 3. Simpan Database Tagihan ke Penyimpanan Internal HP
+const saveTagihanToInternalStorage = async (data) => {
+  try {
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('PDAM_TAGIHAN_DB', JSON.stringify(data));
+      }
+      return;
+    }
+    if (!TAGIHAN_DB_FILE || !FileSystem) return;
+    await ensureDirectoryExists(DATABASE_STORAGE_DIR);
+    await FileSystem.writeAsStringAsync(TAGIHAN_DB_FILE, JSON.stringify(data), {
+      encoding: FileSystem.EncodingType.UTF8,
+    });
+  } catch (err) {
+    console.warn('Gagal menyimpan database tagihan:', err);
+  }
+};
+
+// 4. Baca Database Tagihan dari Penyimpanan Internal HP
+const loadTagihanFromInternalStorage = async () => {
+  try {
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const raw = window.localStorage.getItem('PDAM_TAGIHAN_DB');
+        if (raw) return JSON.parse(raw);
+      }
+      return [];
+    }
+    if (!TAGIHAN_DB_FILE || !FileSystem) return [];
+    await ensureDirectoryExists(DATABASE_STORAGE_DIR);
+    const info = await FileSystem.getInfoAsync(TAGIHAN_DB_FILE);
+    if (info.exists) {
+      const content = await FileSystem.readAsStringAsync(TAGIHAN_DB_FILE, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      if (content) {
+        const parsed = JSON.parse(content);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Gagal membaca database tagihan:', err);
+  }
+  return [];
+};
+
+// 5. Simpan Cache Foto Persil ke Penyimpanan Internal HP
+const saveFotoCacheToInternalStorage = async (data) => {
+  try {
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('PDAM_CACHE_FOTO_DB', JSON.stringify(data));
+      }
+      return;
+    }
+    if (!FOTO_CACHE_DB_FILE || !FileSystem) return;
+    await ensureDirectoryExists(DATABASE_STORAGE_DIR);
+    await FileSystem.writeAsStringAsync(FOTO_CACHE_DB_FILE, JSON.stringify(data), {
+      encoding: FileSystem.EncodingType.UTF8,
+    });
+  } catch (err) {
+    console.warn('Gagal menyimpan cache foto persil:', err);
+  }
+};
+
+// 6. Baca Cache Foto Persil dari Penyimpanan Internal HP
+const loadFotoCacheFromInternalStorage = async () => {
+  try {
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const raw = window.localStorage.getItem('PDAM_CACHE_FOTO_DB');
+        if (raw) return JSON.parse(raw);
+      }
+      return {};
+    }
+    if (!FOTO_CACHE_DB_FILE || !FileSystem) return {};
+    await ensureDirectoryExists(DATABASE_STORAGE_DIR);
+    const info = await FileSystem.getInfoAsync(FOTO_CACHE_DB_FILE);
+    if (info.exists) {
+      const content = await FileSystem.readAsStringAsync(FOTO_CACHE_DB_FILE, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      if (content) {
+        const parsed = JSON.parse(content);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Gagal membaca cache foto persil:', err);
+  }
+  return {};
+};
 
 // Fungsi kompresi foto agar ukuran tidak lebih dari 300 KB & simpan permanen ke penyimpanan HP
 const compressAndSaveFotoPersil = async (sourceUri, identifier) => {
@@ -283,6 +518,80 @@ function MainApp() {
   const [roadDistances, setRoadDistances] = useState({});
   const roadDistanceCacheRef = useRef(new Map());
 
+  // Status loading data dari internal storage
+  const [isStorageLoaded, setIsStorageLoaded] = useState(false);
+
+  // Inisialisasi & Muat seluruh database dari penyimpanan internal saat aplikasi dibuka
+  useEffect(() => {
+    let isMounted = true;
+    const initializeDatabase = async () => {
+      await initStorageDirectories();
+      const [savedPelanggan, savedTagihan, savedFotoCache] = await Promise.all([
+        loadPelangganFromInternalStorage(),
+        loadTagihanFromInternalStorage(),
+        loadFotoCacheFromInternalStorage(),
+      ]);
+
+      if (isMounted) {
+        if (savedPelanggan && Array.isArray(savedPelanggan) && savedPelanggan.length > 0) {
+          setDaftarPelanggan(savedPelanggan);
+        }
+        if (savedTagihan && Array.isArray(savedTagihan) && savedTagihan.length > 0) {
+          setDaftarTagihanPelanggan(savedTagihan);
+        }
+        if (savedFotoCache && typeof savedFotoCache === 'object' && Object.keys(savedFotoCache).length > 0) {
+          setFotoPersilByPelanggan(savedFotoCache);
+        }
+        setIsStorageLoaded(true);
+      }
+    };
+
+    initializeDatabase();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Simpan otomatis ke penyimpanan internal jika Master Data Pelanggan berubah
+  useEffect(() => {
+    if (!isStorageLoaded) return;
+    savePelangganToInternalStorage(daftarPelanggan);
+  }, [daftarPelanggan, isStorageLoaded]);
+
+  // Simpan otomatis ke penyimpanan internal jika Daftar Tagihan berubah
+  useEffect(() => {
+    if (!isStorageLoaded) return;
+    saveTagihanToInternalStorage(daftarTagihanPelanggan);
+  }, [daftarTagihanPelanggan, isStorageLoaded]);
+
+  // Simpan otomatis ke penyimpanan internal jika Cache Foto Persil berubah
+  useEffect(() => {
+    if (!isStorageLoaded) return;
+    saveFotoCacheToInternalStorage(fotoPersilByPelanggan);
+  }, [fotoPersilByPelanggan, isStorageLoaded]);
+
+  // Data pelanggan untuk rute tagihan sesuai periode aktif (dimemoize agar tidak re-render berulang kali saat GPS bergerak)
+  const rutePelanggan = useMemo(() => {
+    const map = new Map();
+    daftarTagihanPelanggan.forEach((t) => {
+      if (t && t.periodeBulan === selectedMonth && t.periodeTahun === selectedYear) {
+        const key = t.tagihanId || t.id || t.noSmb || t.nama;
+        if (key && !map.has(key)) {
+          map.set(key, t);
+        }
+      }
+    });
+    daftarPelanggan.forEach((p) => {
+      if (p && p.periodeBulan === selectedMonth && p.periodeTahun === selectedYear) {
+        const key = p.tagihanId || p.id || p.noSmb || p.nama;
+        if (key && !map.has(key)) {
+          map.set(key, p);
+        }
+      }
+    });
+    return Array.from(map.values());
+  }, [daftarTagihanPelanggan, daftarPelanggan, selectedMonth, selectedYear]);
+
   // Android Back button handler: jangan langsung keluar aplikasi jika ditekan tombol back
   const lastBackPressRef = useRef(0);
 
@@ -377,6 +686,15 @@ function MainApp() {
 
   // State form tambah pelanggan manual
   const [manualNomorSmb, setManualNomorSmb] = useState('');
+  const [manualNama, setManualNama] = useState('');
+  const [manualAlamat, setManualAlamat] = useState('');
+  const [manualFoto, setManualFoto] = useState(null);
+  const [manualCoords, setManualCoords] = useState(null);
+  const [tempPickerCoords, setTempPickerCoords] = useState(null);
+
+  // Ref input field untuk perpindahan fokus otomatis antar kolom
+  const namaInputRef = useRef(null);
+  const alamatInputRef = useRef(null);
 
   // Formatter input Nomor SMB: otomatis gabungkan 2 digit awal dan 5 digit akhir dengan simbol (-)
   const handleNomorSmbChange = (text) => {
@@ -394,13 +712,16 @@ function MainApp() {
       }
       return;
     }
-    setManualNomorSmb(`${digits.slice(0, 2)}-${digits.slice(2)}`);
+    const formatted = `${digits.slice(0, 2)}-${digits.slice(2)}`;
+    setManualNomorSmb(formatted);
+
+    // Jika nomor SMB sudah terisi penuh (7 digit), otomatis pindah selanjutnya ke kolom Nama Pelanggan
+    if (!isDeleting && digits.length === 7) {
+      setTimeout(() => {
+        namaInputRef.current?.focus();
+      }, 50);
+    }
   };
-  const [manualNama, setManualNama] = useState('');
-  const [manualAlamat, setManualAlamat] = useState('');
-  const [manualFoto, setManualFoto] = useState(null);
-  const [manualCoords, setManualCoords] = useState(null);
-  const [tempPickerCoords, setTempPickerCoords] = useState(null);
 
   // Simpan foto persil untuk pelanggan (otomatis tersimpan untuk periode saat ini dan periode selanjutnya)
   const saveFotoPersilForPelanggan = (tagihanId, photoUri) => {
@@ -412,31 +733,39 @@ function MainApp() {
     const customerNoSmb = targetTagihan?.noSmb;
 
     // 1. Simpan foto persil ke semua tagihan pelanggan ini di daftar tagihan (lintas periode)
-    setDaftarTagihanPelanggan((prev) =>
-      prev.map((item) =>
+    setDaftarTagihanPelanggan((prev) => {
+      const updated = prev.map((item) =>
         (item.tagihanId || item.id) === tagihanId ||
           (customerId && item.id === customerId) ||
           (customerNoSmb && item.noSmb === customerNoSmb)
           ? { ...item, fotoPersil: photoUri }
           : item
-      )
-    );
+      );
+      saveTagihanToInternalStorage(updated);
+      return updated;
+    });
 
     // 2. Simpan juga ke master data pelanggan agar saat ditransfer ke periode selanjutnya foto otomatis terbawa
-    setDaftarPelanggan((prev) =>
-      prev.map((item) =>
+    setDaftarPelanggan((prev) => {
+      const updated = prev.map((item) =>
         item.id === customerId || (customerNoSmb && item.noSmb === customerNoSmb)
           ? { ...item, fotoPersil: photoUri }
           : item
-      )
-    );
+      );
+      savePelangganToInternalStorage(updated);
+      return updated;
+    });
 
     // 3. Simpan di map cache fotoPersilByPelanggan
-    setFotoPersilByPelanggan((prev) => ({
-      ...prev,
-      ...(customerId ? { [customerId]: photoUri } : {}),
-      ...(customerNoSmb ? { [customerNoSmb]: photoUri } : {}),
-    }));
+    setFotoPersilByPelanggan((prev) => {
+      const updated = {
+        ...prev,
+        ...(customerId ? { [customerId]: photoUri } : {}),
+        ...(customerNoSmb ? { [customerNoSmb]: photoUri } : {}),
+      };
+      saveFotoCacheToInternalStorage(updated);
+      return updated;
+    });
   };
 
   // Hapus foto persil untuk pelanggan
@@ -455,28 +784,33 @@ function MainApp() {
       } catch (e) { }
     }
 
-    setDaftarTagihanPelanggan((prev) =>
-      prev.map((item) =>
+    setDaftarTagihanPelanggan((prev) => {
+      const updated = prev.map((item) =>
         (item.tagihanId || item.id) === tagihanId ||
           (customerId && item.id === customerId) ||
           (customerNoSmb && item.noSmb === customerNoSmb)
           ? { ...item, fotoPersil: null }
           : item
-      )
-    );
+      );
+      saveTagihanToInternalStorage(updated);
+      return updated;
+    });
 
-    setDaftarPelanggan((prev) =>
-      prev.map((item) =>
+    setDaftarPelanggan((prev) => {
+      const updated = prev.map((item) =>
         item.id === customerId || (customerNoSmb && item.noSmb === customerNoSmb)
           ? { ...item, fotoPersil: null }
           : item
-      )
-    );
+      );
+      savePelangganToInternalStorage(updated);
+      return updated;
+    });
 
     setFotoPersilByPelanggan((prev) => {
       const updated = { ...prev };
       if (customerId) delete updated[customerId];
       if (customerNoSmb) delete updated[customerNoSmb];
+      saveFotoCacheToInternalStorage(updated);
       return updated;
     });
   };
@@ -601,21 +935,30 @@ function MainApp() {
     }
   };
 
-  // Filter pencarian data pelanggan
-  const filteredPelanggan = daftarPelanggan.filter((p) => {
-    if (!pelangganSearchQuery.trim()) return true;
-    const q = pelangganSearchQuery.toLowerCase();
-    return (
-      (p.nama && p.nama.toLowerCase().includes(q)) ||
-      (p.noSmb && p.noSmb.toLowerCase().includes(q)) ||
-      (p.alamat && p.alamat.toLowerCase().includes(q))
-    );
-  });
+  // Set untuk pencarian ID terpilih berkecepatan tinggi O(1)
+  const selectedPelangganSet = useMemo(
+    () => new Set(selectedPelangganIds),
+    [selectedPelangganIds]
+  );
 
-  // Status apakah seluruh data pelanggan yang tampil telah diceklist
-  const isAllPelangganSelected =
-    filteredPelanggan.length > 0 &&
-    filteredPelanggan.every((p) => selectedPelangganIds.includes(p.id));
+  // Filter pencarian data pelanggan (memoized agar tidak menghitung ulang saat GPS atau state lain berkedip)
+  const filteredPelanggan = useMemo(() => {
+    if (!pelangganSearchQuery.trim()) return daftarPelanggan;
+    const q = pelangganSearchQuery.toLowerCase().trim();
+    return daftarPelanggan.filter((p) => {
+      const nama = p.nama ? p.nama.toLowerCase() : '';
+      const noSmb = p.noSmb ? p.noSmb.toLowerCase() : '';
+      const alamat = p.alamat ? p.alamat.toLowerCase() : '';
+      return nama.includes(q) || noSmb.includes(q) || alamat.includes(q);
+    });
+  }, [daftarPelanggan, pelangganSearchQuery]);
+
+  // Status apakah seluruh data pelanggan yang tampil telah diceklist (O(1) instant)
+  const isAllPelangganSelected = useMemo(() => {
+    if (filteredPelanggan.length === 0 || selectedPelangganIds.length === 0) return false;
+    if (selectedPelangganIds.length < filteredPelanggan.length) return false;
+    return filteredPelanggan.every((p) => selectedPelangganSet.has(p.id));
+  }, [filteredPelanggan, selectedPelangganIds.length, selectedPelangganSet]);
 
   // Handler toggle ceklist per pelanggan
   const toggleSelectPelanggan = (id) => {
@@ -643,7 +986,11 @@ function MainApp() {
     const confirmMessage = `Apakah Anda yakin ingin menghapus ${count} data pelanggan yang diceklist secara kolektif dari master database? Data yang dihapus tidak dapat dikembalikan.`;
 
     const executeDelete = () => {
-      setDaftarPelanggan((prev) => prev.filter((p) => !selectedPelangganIds.includes(p.id)));
+      setDaftarPelanggan((prev) => {
+        const updated = prev.filter((p) => !selectedPelangganIds.includes(p.id));
+        savePelangganToInternalStorage(updated);
+        return updated;
+      });
       setSelectedPelangganIds([]);
       if (Platform.OS === 'web') {
         alert(`${count} data pelanggan berhasil dihapus secara kolektif.`);
@@ -678,19 +1025,43 @@ function MainApp() {
     const part1 = (smbParts[0] || '').trim();
     const part2 = (smbParts[1] || '').trim();
 
-    if (!part1 || !part2 || !manualNama.trim() || !manualAlamat.trim()) {
+    if (!part1 || !part2 || !manualAlamat.trim()) {
       if (Platform.OS === 'web') {
-        alert('Harap lengkapi Nomor Smb, Nama Pelanggan, dan Alamat!');
+        alert('Harap lengkapi Nomor SMB dan Alamat!');
       } else {
-        Alert.alert('Form Belum Lengkap', 'Harap lengkapi Nomor Smb, Nama Pelanggan, dan Alamat!');
+        Alert.alert('Form Belum Lengkap', 'Harap lengkapi Nomor SMB dan Alamat!');
       }
       return;
     }
 
+    const inputSmb = `${part1}-${part2}`;
+    const cleanDigits = (s) => (s ? String(s).replace(/\D/g, '') : '');
+    const inputDigits = cleanDigits(inputSmb);
+
+    // Cek apakah nomor SMB sudah ada dalam data pelanggan (cegah data ganda)
+    const duplicatePelanggan = daftarPelanggan.find((p) => {
+      if (!p.noSmb) return false;
+      const sameExact = p.noSmb.trim().toLowerCase() === inputSmb.trim().toLowerCase();
+      const sameDigits = inputDigits.length > 0 && cleanDigits(p.noSmb) === inputDigits;
+      return sameExact || sameDigits;
+    });
+
+    if (duplicatePelanggan) {
+      const feedbackPemberitahuan = `Nomor SMB "${inputSmb}" sudah terdaftar dalam data pelanggan atas nama "${duplicatePelanggan.nama}".\n\nData ganda tidak diperbolehkan. Harap gunakan Nomor SMB lain!`;
+      if (Platform.OS === 'web') {
+        alert(feedbackPemberitahuan);
+      } else {
+        Alert.alert('Nomor SMB Sudah Ada (Data Ganda)', feedbackPemberitahuan);
+      }
+      return;
+    }
+
+    const finalNama = manualNama.trim() || 'Super Pelanggan';
+
     const newCustomer = {
       id: Date.now().toString(),
-      noSmb: `${part1}-${part2}`,
-      nama: manualNama.trim(),
+      noSmb: inputSmb,
+      nama: finalNama,
       alamat: manualAlamat.trim(),
       foto: manualFoto || 'Tersedia',
       koordinat: manualCoords || (userLocation ? `${userLocation.lat.toFixed(5)}, ${userLocation.lng.toFixed(5)}` : '-7.25751, 112.75214'),
@@ -698,7 +1069,11 @@ function MainApp() {
       tanggal: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }),
     };
 
-    setDaftarPelanggan((prev) => [newCustomer, ...prev]);
+    setDaftarPelanggan((prev) => {
+      const updated = [newCustomer, ...prev];
+      savePelangganToInternalStorage(updated);
+      return updated;
+    });
 
     // Reset Form Input
     setManualNomorSmb('');
@@ -712,7 +1087,11 @@ function MainApp() {
   };
 
   const handleDeletePelanggan = (id) => {
-    setDaftarPelanggan((prev) => prev.filter((item) => item.id !== id));
+    setDaftarPelanggan((prev) => {
+      const updated = prev.filter((item) => item.id !== id);
+      savePelangganToInternalStorage(updated);
+      return updated;
+    });
     setSelectedPelangganIds((prev) => prev.filter((itemId) => itemId !== id));
   };
 
@@ -746,10 +1125,18 @@ function MainApp() {
         const arrayBuffer = await response.arrayBuffer();
         workbook = XLSX.read(arrayBuffer, { type: 'array' });
       } else {
-        const base64 = await FileSystem.readAsStringAsync(asset.uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        workbook = XLSX.read(base64, { type: 'base64' });
+        let base64;
+        try {
+          base64 = await FileSystem.readAsStringAsync(asset.uri, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          workbook = XLSX.read(base64, { type: 'base64' });
+        } catch (readErr) {
+          // Fallback: baca via fetch jika FileSystem gagal baca content:// URI
+          const response = await fetch(asset.uri);
+          const arrayBuffer = await response.arrayBuffer();
+          workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        }
       }
 
       const sheetName = workbook.SheetNames && workbook.SheetNames[0];
@@ -758,41 +1145,80 @@ function MainApp() {
       }
 
       const worksheet = workbook.Sheets[sheetName];
-      const rawRows = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+      const aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
 
-      if (!rawRows || rawRows.length === 0) {
+      if (!aoa || aoa.length === 0) {
         throw new Error('Tidak ada data baris yang ditemukan di dalam file Excel.');
       }
 
+      // Deteksi baris kategori / header (cari di 5 baris pertama)
+      let headerRowIndex = 0;
+      for (let i = 0; i < Math.min(aoa.length, 5); i++) {
+        const rowStr = (aoa[i] || []).map((c) => String(c).toLowerCase().replace(/[^a-z0-9]/g, '')).join(' ');
+        if (
+          rowStr.includes('smb') ||
+          rowStr.includes('alamat') ||
+          rowStr.includes('lat') ||
+          rowStr.includes('long') ||
+          rowStr.includes('nama')
+        ) {
+          headerRowIndex = i;
+          break;
+        }
+      }
+
+      const headers = (aoa[headerRowIndex] || []).map((h) => String(h || '').trim());
+      const rawRows = aoa.slice(headerRowIndex + 1).map((r) => {
+        const obj = {};
+        headers.forEach((h, idx) => {
+          if (h) obj[h] = r[idx] !== undefined ? r[idx] : '';
+        });
+        return obj;
+      });
+
+      if (!rawRows || rawRows.length === 0) {
+        throw new Error('Tidak ada data baris pelanggan yang ditemukan setelah baris kategori.');
+      }
+
+      const cleanDigits = (s) => (s ? String(s).replace(/\D/g, '') : '');
+      const existingSmbSet = new Set(
+        daftarPelanggan.map((p) => (p.noSmb ? p.noSmb.trim().toLowerCase() : '')).filter(Boolean)
+      );
+      const existingDigitsSet = new Set(
+        daftarPelanggan.map((p) => cleanDigits(p.noSmb)).filter((d) => d.length > 0)
+      );
+
+      const seenSmbInFile = new Set();
       const importedCustomers = [];
+      const duplicateSmbList = [];
       const timestamp = Date.now();
 
       rawRows.forEach((row, index) => {
-        // Ambil No SMB
+        // Ambil No SMB (Kategori No. Smb)
         const rawSmb = findColumnValue(row, [
-          'no. smb', 'no smb', 'nosmb', 'nomor smb', 'no sambungan', 'no_smb', 'smb', 'nomor pelanggan', 'no pelanggan'
+          'no. smb', 'no smb', 'nosmb', 'nomor smb', 'no sambungan', 'no_smb', 'smb', 'nomor pelanggan', 'no pelanggan', 'id pelanggan', 'kategori no. smb', 'kategori no smb'
         ]);
-        // Ambil Nama Pelanggan
+        // Ambil Nama Pelanggan (Kategori Nama Pelanggan - jika tidak ada otomatis Super Pelanggan)
         const rawNama = findColumnValue(row, [
-          'nama pelanggan', 'nama', 'nama_pelanggan', 'customer', 'customer name', 'nama konsumen'
+          'nama pelanggan', 'nama', 'nama_pelanggan', 'customer', 'customer name', 'nama konsumen', 'nama lengkap', 'kategori nama pelanggan', 'kategori nama'
         ]);
-        // Ambil Alamat
+        // Ambil Alamat (Kategori Alamat)
         const rawAlamat = findColumnValue(row, [
-          'alamat', 'alamat pelanggan', 'address', 'alamat rumah', 'lokasi'
+          'alamat', 'alamat pelanggan', 'address', 'alamat rumah', 'lokasi', 'kategori alamat'
         ]);
         // Ambil Latitude & Longitude / Longtitude
         const rawLat = findColumnValue(row, [
-          'latitude', 'lat', 'garis lintang', 'lintang'
+          'latitude', 'lat', 'garis lintang', 'lintang', 'kategori latitude', 'kategori lat'
         ]);
         const rawLng = findColumnValue(row, [
-          'longtitude', 'longitude', 'long', 'lng', 'garis bujur', 'bujur'
+          'longtitude', 'longitude', 'long', 'lng', 'garis bujur', 'bujur', 'kategori longitude', 'kategori longtitude'
         ]);
         const rawCoord = findColumnValue(row, [
-          'titik koordinat', 'titik kordinat', 'koordinat', 'coords', 'coord'
+          'titik koordinat', 'titik kordinat', 'koordinat', 'coords', 'coord', 'kategori koordinat'
         ]);
 
-        // Lewati baris kosong jika tidak ada nama dan no smb
-        if (!rawNama && !rawSmb) return;
+        // Lewati baris kosong jika tidak ada data sama sekali
+        if (!rawSmb && !rawAlamat && !rawNama && !rawLat && !rawLng && !rawCoord) return;
 
         let latNum = null;
         let lngNum = null;
@@ -801,15 +1227,26 @@ function MainApp() {
           const parsedLat = parseFloat(String(rawLat).replace(',', '.'));
           const parsedLng = parseFloat(String(rawLng).replace(',', '.'));
           if (!isNaN(parsedLat) && !isNaN(parsedLng)) {
-            latNum = parsedLat;
-            lngNum = parsedLng;
+            // Auto-koreksi jika kolom latitude dan longitude tertukar (di Indonesia lat sekitar -7.x dan lng sekitar 112.x)
+            if (parsedLat > 50 && parsedLng < 20) {
+              latNum = parsedLng;
+              lngNum = parsedLat;
+            } else {
+              latNum = parsedLat;
+              lngNum = parsedLng;
+            }
           }
         } else if (rawCoord) {
           const clean = String(rawCoord).replace(/[()]/g, '');
-          const parts = clean.split(',').map((s) => parseFloat(s.trim()));
+          const parts = clean.split(',').map((s) => parseFloat(s.trim().replace(',', '.')));
           if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-            latNum = parts[0];
-            lngNum = parts[1];
+            if (parts[0] > 50 && parts[1] < 20) {
+              latNum = parts[1];
+              lngNum = parts[0];
+            } else {
+              latNum = parts[0];
+              lngNum = parts[1];
+            }
           }
         }
 
@@ -821,16 +1258,39 @@ function MainApp() {
           finalSmb = `${padded.slice(0, 2)}-${padded.slice(2)}`;
         }
 
-        // Format titik koordinat sesuai instruksi: (latitude, longtitude)
+        const smbKey = finalSmb.toLowerCase();
+        const smbDigits = digitsOnly;
+
+        // Cek apakah No SMB sudah ada di master database pelanggan atau ganda di file Excel itu sendiri
+        const isDuplicateDb = existingSmbSet.has(smbKey) || (smbDigits && existingDigitsSet.has(smbDigits));
+        const isDuplicateFile = seenSmbInFile.has(smbKey) || (smbDigits && seenSmbInFile.has(smbDigits));
+
+        if (isDuplicateDb || isDuplicateFile) {
+          duplicateSmbList.push({
+            noSmb: finalSmb,
+            nama: rawNama ? String(rawNama).trim() : 'Super Pelanggan',
+            alasan: isDuplicateDb ? 'Sudah ada di data pelanggan' : 'Ganda di file Excel',
+          });
+          return; // Lewati agar tidak ada data ganda masuk ke database
+        }
+
+        seenSmbInFile.add(smbKey);
+        if (smbDigits) seenSmbInFile.add(smbDigits);
+
+        // Format titik koordinat sesuai instruksi: digabung dengan format (latitude, longtitude)
         const finalLat = latNum !== null ? latNum : (userLocation ? userLocation.lat : -7.25751);
         const finalLng = lngNum !== null ? lngNum : (userLocation ? userLocation.lng : 112.75214);
         const koordinatFormatted = `(${finalLat}, ${finalLng})`;
 
+        // Nama pelanggan otomatis "Super Pelanggan" jika tidak ada di Excel
+        const finalNama = (rawNama && String(rawNama).trim()) ? String(rawNama).trim() : 'Super Pelanggan';
+        const finalAlamat = (rawAlamat && String(rawAlamat).trim()) ? String(rawAlamat).trim() : 'Alamat Belum Diatur';
+
         importedCustomers.push({
           id: `IMP-${timestamp}-${index + 1}`,
           noSmb: finalSmb,
-          nama: rawNama ? String(rawNama).trim() : `Pelanggan ${index + 1}`,
-          alamat: rawAlamat ? String(rawAlamat).trim() : 'Alamat Belum Diatur',
+          nama: finalNama,
+          alamat: finalAlamat,
           koordinat: koordinatFormatted,
           latitude: finalLat,
           longitude: finalLng,
@@ -845,15 +1305,34 @@ function MainApp() {
       });
 
       if (importedCustomers.length === 0) {
+        if (duplicateSmbList.length > 0) {
+          const contohGanda = duplicateSmbList.slice(0, 3).map((d) => `${d.noSmb} (${d.nama})`).join(', ');
+          const pesanSemuaGanda = `Tidak ada data baru yang ditambahkan karena seluruh Nomor SMB (${duplicateSmbList.length} data) dalam file Excel sudah terdaftar di data pelanggan (data ganda):\n\n${contohGanda}${duplicateSmbList.length > 3 ? '...' : ''}\n\nSistem menolak data ganda agar database tetap rapi.`;
+          if (Platform.OS === 'web') {
+            alert(pesanSemuaGanda);
+          } else {
+            Alert.alert('Nomor SMB Ganda Terdeteksi', pesanSemuaGanda);
+          }
+          return;
+        }
         throw new Error(
-          'Tidak ada data pelanggan yang cocok. Pastikan file Excel memiliki kolom: No. SMB, Nama Pelanggan, Alamat, Latitude, dan Longtitude.'
+          'Tidak ada data pelanggan yang cocok. Pastikan file Excel memiliki baris kategori: No. SMB, Alamat, Latitude, dan Longitude (Nama Pelanggan opsional).'
         );
       }
 
-      // Masukkan semua data ke dalam data pelanggan
-      setDaftarPelanggan((prev) => [...importedCustomers, ...prev]);
+      // Masukkan semua data ke dalam data pelanggan dan simpan ke internal storage
+      setDaftarPelanggan((prev) => {
+        const updated = [...importedCustomers, ...prev];
+        savePelangganToInternalStorage(updated);
+        return updated;
+      });
 
-      const pesanSukses = `Berhasil mengimpor ${importedCustomers.length} data pelanggan dari file "${asset.name}".`;
+      let pesanSukses = `Berhasil mengimpor ${importedCustomers.length} data pelanggan baru dari file "${asset.name}".`;
+      if (duplicateSmbList.length > 0) {
+        const contohLewat = duplicateSmbList.slice(0, 2).map((d) => d.noSmb).join(', ');
+        pesanSukses += `\n\nCatatan: ${duplicateSmbList.length} data dengan Nomor SMB ganda telah dilewati otomatis (contoh: ${contohLewat}${duplicateSmbList.length > 2 ? '...' : ''}) agar tidak ada data ganda.`;
+      }
+
       if (Platform.OS === 'web') {
         alert(pesanSukses);
       } else {
@@ -889,7 +1368,8 @@ function MainApp() {
       // Cek apakah pelanggan sudah terdaftar di tagihan periode tahun & bulan ini
       const sudahAda = daftarTagihanPelanggan.some(
         (item) =>
-          item.id === targetCustomer.id &&
+          (item.id === targetCustomer.id ||
+            (item.noSmb && targetCustomer.noSmb && item.noSmb.trim().toLowerCase() === targetCustomer.noSmb.trim().toLowerCase())) &&
           item.periodeBulan === month &&
           item.periodeTahun === targetYear
       );
@@ -930,7 +1410,11 @@ function MainApp() {
         tanggalTransfer: new Date().toLocaleDateString('id-ID'),
       };
 
-      setDaftarTagihanPelanggan((prev) => [itemTagihan, ...prev]);
+      setDaftarTagihanPelanggan((prev) => {
+        const updated = [itemTagihan, ...prev];
+        saveTagihanToInternalStorage(updated);
+        return updated;
+      });
       setSelectedMonth(month);
       setSelectedYear(targetYear);
       setPeriodModalVisible(false);
@@ -958,9 +1442,11 @@ function MainApp() {
   };
 
   const handleHapusTagihan = (tagihanId) => {
-    setDaftarTagihanPelanggan((prev) =>
-      prev.filter((item) => (item.tagihanId || item.id) !== tagihanId)
-    );
+    setDaftarTagihanPelanggan((prev) => {
+      const updated = prev.filter((item) => (item.tagihanId || item.id) !== tagihanId);
+      saveTagihanToInternalStorage(updated);
+      return updated;
+    });
   };
 
 
@@ -1183,6 +1669,131 @@ function MainApp() {
     );
   };
 
+  // Render Item FlatList untuk performa ultra tinggi (Virtualisasi data ribuan pelanggan)
+  // Dideklarasikan di sini agar seluruh hook selalu terpanggil secara berurutan sebelum conditional return layar apapun
+  const renderPelangganCard = useCallback(
+    ({ item }) => {
+      const isItemSelected = selectedPelangganSet.has(item.id);
+      const isExpanded = expandedPelangganId === item.id;
+      return (
+        <View
+          style={[
+            styles.pelangganItemCard,
+            isItemSelected && styles.pelangganItemCardSelected,
+          ]}
+        >
+          {/* Baris 1: No. SMB & Nama Pelanggan di Baris Satu, Aksi di Kanan (Tanpa Chevron) */}
+          <View style={styles.pelangganItemRow1}>
+            <View style={styles.pelangganItemRow1Left}>
+              {/* Tombol Ceklist per Data Pelanggan */}
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={() => toggleSelectPelanggan(item.id)}
+                style={styles.pelangganCheckboxBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Ionicons
+                  name={isItemSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                  size={21}
+                  color={isItemSelected ? '#10B981' : '#94A3B8'}
+                />
+              </TouchableOpacity>
+
+              <View style={styles.pelangganNoSmbBadge}>
+                <Text style={styles.pelangganNoSmbText}>{item.noSmb || '-'}</Text>
+              </View>
+
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={() => {
+                  if (selectedPelangganIds.length > 0) {
+                    toggleSelectPelanggan(item.id);
+                  } else {
+                    setExpandedPelangganId(isExpanded ? null : item.id);
+                  }
+                }}
+                style={styles.pelangganNameInlineWrapper}
+              >
+                <Text style={styles.pelangganItemNameInline} numberOfLines={1}>
+                  {item.nama || 'Super Pelanggan'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.pelangganTopActionRow}>
+              {/* Tombol Add ke Daftar Tagihan (Selalu icon +, tidak berubah centang) */}
+              <TouchableOpacity
+                style={styles.pelangganAddBtn}
+                activeOpacity={0.7}
+                onPress={() => handleOpenTransferModal(item)}
+              >
+                <Ionicons name="add" size={16} color="#07326E" />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => handleDeletePelanggan(item.id)}
+                activeOpacity={0.7}
+                style={styles.pelangganDeleteBtn}
+              >
+                <Ionicons name="trash-outline" size={15} color="#EF4444" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Baris 2: Alamat Pelanggan */}
+          <TouchableOpacity
+            activeOpacity={selectedPelangganIds.length > 0 ? 0.7 : 0.85}
+            onPress={() => {
+              if (selectedPelangganIds.length > 0) {
+                toggleSelectPelanggan(item.id);
+              } else {
+                setExpandedPelangganId(isExpanded ? null : item.id);
+              }
+            }}
+            style={styles.pelangganAddressRow}
+          >
+            <Text style={styles.pelangganItemAddressText} numberOfLines={2}>
+              {item.alamat || '-'}
+            </Text>
+          </TouchableOpacity>
+
+          {/* Detail: Titik Koordinat (Hanya muncul jika Nama Pelanggan diklik) */}
+          {isExpanded && (
+            <View style={styles.pelangganDetailContainer}>
+              <View style={styles.pelangganDetailSection}>
+                <View style={styles.pelangganCoordBox}>
+                  <View style={styles.pelangganCoordIconCircle}>
+                    <Ionicons name="location" size={18} color="#EF4444" />
+                  </View>
+                  <View style={styles.pelangganCoordTextContainer}>
+                    <Text style={styles.pelangganCoordTitle}>Koordinat Terpilih</Text>
+                    <Text style={styles.pelangganCoordValue}>{item.koordinat || '-'}</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.pelangganBukaPetaBtn}
+                    activeOpacity={0.8}
+                    onPress={() => {
+                      const clean = String(item.koordinat || '').replace(/[()]/g, '').trim();
+                      if (Platform.OS === 'web') {
+                        window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`, '_blank');
+                      } else {
+                        Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`);
+                      }
+                    }}
+                  >
+                    <Text style={styles.pelangganBukaPetaBtnText}>Buka Maps</Text>
+                    <Ionicons name="open-outline" size={12} color="#07326E" style={{ marginLeft: 3 }} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          )}
+        </View>
+      );
+    },
+    [selectedPelangganSet, expandedPelangganId, selectedPelangganIds.length, toggleSelectPelanggan, handleOpenTransferModal, handleDeletePelanggan]
+  );
+
   useEffect(() => {
     let isMounted = true;
     let subscription = null;
@@ -1273,16 +1884,25 @@ function MainApp() {
 
   // Baca jarak kordinat pelanggan dari lokasi saya sesuai rute jalan yang akan dilewati (bukan garis lurus)
   useEffect(() => {
-    if (!userLocation || typeof userLocation.lat !== 'number' || typeof userLocation.lng !== 'number') return;
-    if (!daftarTagihanPelanggan || daftarTagihanPelanggan.length === 0) return;
+    if (!userLocation || typeof userLocation.lat !== 'number' || typeof userLocation.lng !== 'number' || isNaN(userLocation.lat) || isNaN(userLocation.lng)) return;
+    if (!daftarTagihanPelanggan || !Array.isArray(daftarTagihanPelanggan) || daftarTagihanPelanggan.length === 0) return;
 
     const targets = [];
     daftarTagihanPelanggan.forEach((t) => {
+      if (!t) return;
       const coords = parseCustomerCoords(t);
-      if (coords) {
+      if (
+        coords &&
+        typeof coords.lat === 'number' &&
+        typeof coords.lng === 'number' &&
+        !isNaN(coords.lat) &&
+        !isNaN(coords.lng)
+      ) {
         const id = t.tagihanId || t.id;
-        const cacheKey = `${userLocation.lat.toFixed(4)},${userLocation.lng.toFixed(4)}_${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`;
-        targets.push({ id, coords, cacheKey });
+        if (id) {
+          const cacheKey = `${userLocation.lat.toFixed(4)},${userLocation.lng.toFixed(4)}_${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`;
+          targets.push({ id, coords, cacheKey });
+        }
       }
     });
 
@@ -1304,9 +1924,11 @@ function MainApp() {
 
     if (toFetch.length === 0) return;
 
+    // Ambil maksimal 25 item agar URL OSRM tidak melampaui limit GET server
+    const fetchChunk = toFetch.slice(0, 25);
     const coordsQuery = [
       `${userLocation.lng},${userLocation.lat}`,
-      ...toFetch.map((t) => `${t.coords.lng},${t.coords.lat}`),
+      ...fetchChunk.map((t) => `${t.coords.lng},${t.coords.lat}`),
     ].join(';');
 
     const url = `https://router.project-osrm.org/table/v1/driving/${coordsQuery}?sources=0&annotations=distance`;
@@ -1317,7 +1939,7 @@ function MainApp() {
         if (data && data.code === 'Ok' && data.distances && data.distances[0]) {
           const distances = data.distances[0];
           const fetchedMap = {};
-          toFetch.forEach((t, index) => {
+          fetchChunk.forEach((t, index) => {
             const meters = distances[index + 1];
             if (typeof meters === 'number' && !isNaN(meters)) {
               const km = meters / 1000;
@@ -1335,10 +1957,11 @@ function MainApp() {
 
   // Form: Daftar Tagihan
   if (currentScreen === 'daftar_tagihan') {
-    const rawTagihanPeriodeIni = daftarTagihanPelanggan.filter(
+    const rawTagihanPeriodeIni = (daftarTagihanPelanggan || []).filter(
       (tagihan) =>
+        tagihan &&
         tagihan.periodeBulan === selectedMonth &&
-        tagihan.periodeTahun === selectedYear
+        String(tagihan.periodeTahun) === String(selectedYear)
     );
 
     // Hitung jarak sesuai rute jalan yang dilewati & urutkan pelanggan dari yang paling dekat dengan lokasi saya
@@ -1348,9 +1971,20 @@ function MainApp() {
         let distanceKm = null;
         let distanceFormatted = null;
 
-        if (userLocation && coords) {
+        if (
+          userLocation &&
+          coords &&
+          typeof userLocation.lat === 'number' &&
+          typeof userLocation.lng === 'number' &&
+          typeof coords.lat === 'number' &&
+          typeof coords.lng === 'number' &&
+          !isNaN(userLocation.lat) &&
+          !isNaN(userLocation.lng) &&
+          !isNaN(coords.lat) &&
+          !isNaN(coords.lng)
+        ) {
           const tagihanKey = tagihan.tagihanId || tagihan.id;
-          if (roadDistances[tagihanKey] != null) {
+          if (tagihanKey && roadDistances[tagihanKey] != null) {
             // Jarak rute jalan riil (bukan garis lurus)
             distanceKm = roadDistances[tagihanKey];
           } else {
@@ -1374,10 +2008,12 @@ function MainApp() {
         };
       })
       .sort((a, b) => {
-        if (a._distanceKm == null && b._distanceKm == null) return 0;
-        if (a._distanceKm == null) return 1; // Jika tidak ada koordinat ditaruh di bawah
-        if (b._distanceKm == null) return -1;
-        return a._distanceKm - b._distanceKm; // Urutkan dari yang terdekat (paling atas) ke terjauh
+        const distA = typeof a._distanceKm === 'number' && !isNaN(a._distanceKm) ? a._distanceKm : null;
+        const distB = typeof b._distanceKm === 'number' && !isNaN(b._distanceKm) ? b._distanceKm : null;
+        if (distA == null && distB == null) return 0;
+        if (distA == null) return 1; // Jika tidak ada koordinat ditaruh di bawah
+        if (distB == null) return -1;
+        return distA - distB; // Urutkan dari yang terdekat (paling atas) ke terjauh
       });
 
     return (
@@ -1479,172 +2115,162 @@ function MainApp() {
               </View>
             ) : (
               <View style={styles.tagihanListWrap}>
-                {tagihanPeriodeIni.map((tagihan) => (
-                  <View key={tagihan.tagihanId || tagihan.id} style={styles.pelangganItemCard}>
-                    {/* Baris 1: No. SMB & Nama Pelanggan di Baris Satu, Estimasi Jarak & Hapus di Kanan (Tanpa Chevron) */}
-                    <View style={styles.pelangganItemRow1}>
-                      <View style={styles.pelangganItemRow1Left}>
-                        <View style={styles.pelangganNoSmbBadge}>
-                          <Text style={styles.pelangganNoSmbText}>{tagihan.noSmb}</Text>
+                {tagihanPeriodeIni.map((tagihan, index) => {
+                  const itemKey = tagihan.tagihanId || tagihan.id || `tgh-${index}`;
+                  const isExpanded = expandedTagihanId === itemKey;
+                  return (
+                    <View key={itemKey} style={styles.pelangganItemCard}>
+                      {/* Baris 1: No. SMB & Nama Pelanggan di Baris Satu, Estimasi Jarak & Hapus di Kanan (Tanpa Chevron) */}
+                      <View style={styles.pelangganItemRow1}>
+                        <View style={styles.pelangganItemRow1Left}>
+                          <View style={styles.pelangganNoSmbBadge}>
+                            <Text style={styles.pelangganNoSmbText}>{tagihan.noSmb || '-'}</Text>
+                          </View>
+
+                          <TouchableOpacity
+                            activeOpacity={0.7}
+                            onPress={() => setExpandedTagihanId(isExpanded ? null : itemKey)}
+                            style={styles.pelangganNameInlineWrapper}
+                          >
+                            <Text style={styles.pelangganItemNameInline} numberOfLines={1}>
+                              {tagihan.nama || 'Super Pelanggan'}
+                            </Text>
+                          </TouchableOpacity>
                         </View>
 
-                        <TouchableOpacity
-                          activeOpacity={0.7}
-                          onPress={() =>
-                            setExpandedTagihanId(
-                              expandedTagihanId === (tagihan.tagihanId || tagihan.id)
-                                ? null
-                                : (tagihan.tagihanId || tagihan.id)
-                            )
-                          }
-                          style={styles.pelangganNameInlineWrapper}
-                        >
-                          <Text style={styles.pelangganItemNameInline} numberOfLines={1}>
-                            {tagihan.nama}
-                          </Text>
-                        </TouchableOpacity>
+                        <View style={styles.pelangganTopActionRow}>
+                          {tagihan._distanceFormatted ? (
+                            <View style={styles.tagihanJarakBadge}>
+                              <Ionicons name="navigate" size={10} color="#047857" style={{ marginRight: 3 }} />
+                              <Text style={styles.tagihanJarakText}>{tagihan._distanceFormatted}</Text>
+                            </View>
+                          ) : null}
+
+                          {/* Icon Chevron dihapus untuk menghemat ruang */}
+
+                          <TouchableOpacity
+                            onPress={() => handleHapusTagihan(itemKey)}
+                            activeOpacity={0.7}
+                            style={styles.pelangganDeleteBtn}
+                          >
+                            <Ionicons name="trash-outline" size={15} color="#EF4444" />
+                          </TouchableOpacity>
+                        </View>
                       </View>
 
-                      <View style={styles.pelangganTopActionRow}>
-                        {tagihan._distanceFormatted ? (
-                          <View style={styles.tagihanJarakBadge}>
-                            <Ionicons name="navigate" size={10} color="#047857" style={{ marginRight: 3 }} />
-                            <Text style={styles.tagihanJarakText}>{tagihan._distanceFormatted}</Text>
-                          </View>
-                        ) : null}
+                      {/* Baris 2: Alamat Pelanggan */}
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => setExpandedTagihanId(isExpanded ? null : itemKey)}
+                        style={styles.pelangganAddressRow}
+                      >
+                        <Text style={styles.pelangganItemAddressText} numberOfLines={2}>
+                          {tagihan.alamat || '-'}
+                        </Text>
+                      </TouchableOpacity>
 
-                        {/* Icon Chevron dihapus untuk menghemat ruang */}
-
-                        <TouchableOpacity
-                          onPress={() => handleHapusTagihan(tagihan.tagihanId || tagihan.id)}
-                          activeOpacity={0.7}
-                          style={styles.pelangganDeleteBtn}
-                        >
-                          <Ionicons name="trash-outline" size={15} color="#EF4444" />
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-
-                    {/* Baris 2: Alamat Pelanggan */}
-                    <TouchableOpacity
-                      activeOpacity={0.85}
-                      onPress={() =>
-                        setExpandedTagihanId(
-                          expandedTagihanId === (tagihan.tagihanId || tagihan.id)
-                            ? null
-                            : (tagihan.tagihanId || tagihan.id)
-                        )
-                      }
-                      style={styles.pelangganAddressRow}
-                    >
-                      <Text style={styles.pelangganItemAddressText} numberOfLines={2}>
-                        {tagihan.alamat}
-                      </Text>
-                    </TouchableOpacity>
-
-                    {/* Detail & Form Foto Persil: Muncul jika Pelanggan diklik */}
-                    {expandedTagihanId === (tagihan.tagihanId || tagihan.id) ? (
-                      <View style={styles.pelangganDetailContainer}>
-                        {/* Form Foto Persil Sesuai Tampilan Desain */}
-                        <View style={styles.tagihanFotoPersilSection}>
-                          <Text style={styles.tagihanFotoPersilTitle}>Foto Persil</Text>
-                          <View style={styles.tagihanFotoPersilBtnRow}>
-                            <TouchableOpacity
-                              style={styles.tagihanFotoPersilBtn}
-                              activeOpacity={0.8}
-                              onPress={() => handleBukaKameraTagihan(tagihan.tagihanId || tagihan.id)}
-                            >
-                              <Ionicons name="camera-outline" size={16} color="#07326E" style={{ marginRight: 6 }} />
-                              <Text style={styles.tagihanFotoPersilBtnText}>Buka Kamera</Text>
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                              style={styles.tagihanFotoPersilBtn}
-                              activeOpacity={0.8}
-                              onPress={() => handleBukaGaleriTagihan(tagihan.tagihanId || tagihan.id)}
-                            >
-                              <Ionicons name="images-outline" size={16} color="#07326E" style={{ marginRight: 6 }} />
-                              <Text style={styles.tagihanFotoPersilBtnText}>Dari Galeri</Text>
-                            </TouchableOpacity>
-                          </View>
-
-                          {/* Foto Persil yang sudah diambil: Hanya tampilkan foto saja tanpa keterangan apapun */}
-                          {tagihan.fotoPersil ? (
-                            <View style={styles.fotoPersilPreviewWrapper}>
+                      {/* Detail & Form Foto Persil: Muncul jika Pelanggan diklik */}
+                      {isExpanded ? (
+                        <View style={styles.pelangganDetailContainer}>
+                          {/* Form Foto Persil Sesuai Tampilan Desain */}
+                          <View style={styles.tagihanFotoPersilSection}>
+                            <Text style={styles.tagihanFotoPersilTitle}>Foto Persil</Text>
+                            <View style={styles.tagihanFotoPersilBtnRow}>
                               <TouchableOpacity
-                                activeOpacity={0.88}
-                                onPress={() =>
-                                  setSelectedPhotoFull({
-                                    uri: tagihan.fotoPersil,
-                                    title: `Foto Persil - ${tagihan.nama} (${tagihan.noSmb})`,
-                                  })
-                                }
-                                style={styles.fotoPersilImageContainer}
+                                style={styles.tagihanFotoPersilBtn}
+                                activeOpacity={0.8}
+                                onPress={() => handleBukaKameraTagihan(itemKey)}
                               >
-                                <Image
-                                  source={{ uri: tagihan.fotoPersil }}
-                                  style={styles.fotoPersilCleanImage}
-                                  resizeMode="cover"
-                                />
+                                <Ionicons name="camera-outline" size={16} color="#07326E" style={{ marginRight: 6 }} />
+                                <Text style={styles.tagihanFotoPersilBtnText}>Buka Kamera</Text>
                               </TouchableOpacity>
 
-                              {/* Tombol hapus foto floating di sudut foto tanpa teks/keterangan */}
                               <TouchableOpacity
-                                onPress={() =>
-                                  handleHapusFotoPersilTagihan(tagihan.tagihanId || tagihan.id)
-                                }
-                                activeOpacity={0.7}
-                                style={styles.fotoPersilHapusFloatingBtn}
+                                style={styles.tagihanFotoPersilBtn}
+                                activeOpacity={0.8}
+                                onPress={() => handleBukaGaleriTagihan(itemKey)}
                               >
-                                <Ionicons name="trash-outline" size={15} color="#FFFFFF" />
+                                <Ionicons name="images-outline" size={16} color="#07326E" style={{ marginRight: 6 }} />
+                                <Text style={styles.tagihanFotoPersilBtnText}>Dari Galeri</Text>
                               </TouchableOpacity>
+                            </View>
+
+                            {/* Foto Persil yang sudah diambil: Hanya tampilkan foto saja tanpa keterangan apapun */}
+                            {tagihan.fotoPersil ? (
+                              <View style={styles.fotoPersilPreviewWrapper}>
+                                <TouchableOpacity
+                                  activeOpacity={0.88}
+                                  onPress={() =>
+                                    setSelectedPhotoFull({
+                                      uri: tagihan.fotoPersil,
+                                      title: `Foto Persil - ${tagihan.nama || ''} (${tagihan.noSmb || ''})`,
+                                    })
+                                  }
+                                  style={styles.fotoPersilImageContainer}
+                                >
+                                  <Image
+                                    source={{ uri: tagihan.fotoPersil }}
+                                    style={styles.fotoPersilCleanImage}
+                                    resizeMode="cover"
+                                  />
+                                </TouchableOpacity>
+
+                                {/* Tombol hapus foto floating di sudut foto tanpa teks/keterangan */}
+                                <TouchableOpacity
+                                  onPress={() => handleHapusFotoPersilTagihan(itemKey)}
+                                  activeOpacity={0.7}
+                                  style={styles.fotoPersilHapusFloatingBtn}
+                                >
+                                  <Ionicons name="trash-outline" size={15} color="#FFFFFF" />
+                                </TouchableOpacity>
+                              </View>
+                            ) : null}
+                          </View>
+
+                          {/* Titik Koordinat jika ada */}
+                          {tagihan.koordinat ? (
+                            <View style={[styles.pelangganDetailSection, { marginTop: 10 }]}>
+                              <View style={styles.pelangganCoordBox}>
+                                <View style={styles.pelangganCoordIconCircle}>
+                                  <Ionicons name="location" size={18} color="#EF4444" />
+                                </View>
+                                <View style={styles.pelangganCoordTextContainer}>
+                                  <Text style={styles.pelangganCoordTitle}>Koordinat Terpilih</Text>
+                                  <Text style={styles.pelangganCoordValue}>{String(tagihan.koordinat)}</Text>
+                                </View>
+                                <TouchableOpacity
+                                  style={styles.pelangganBukaPetaBtn}
+                                  activeOpacity={0.8}
+                                  onPress={() => {
+                                    const clean = String(tagihan.koordinat || '').replace(/[()]/g, '').trim();
+                                    if (Platform.OS === 'web') {
+                                      window.open(
+                                        `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`,
+                                        '_blank'
+                                      );
+                                    } else {
+                                      Linking.openURL(
+                                        `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`
+                                      );
+                                    }
+                                  }}
+                                >
+                                  <Text style={styles.pelangganBukaPetaBtnText}>Buka Maps</Text>
+                                  <Ionicons
+                                    name="open-outline"
+                                    size={12}
+                                    color="#07326E"
+                                    style={{ marginLeft: 3 }}
+                                  />
+                                </TouchableOpacity>
+                              </View>
                             </View>
                           ) : null}
                         </View>
-
-                        {/* Titik Koordinat jika ada */}
-                        {tagihan.koordinat ? (
-                          <View style={[styles.pelangganDetailSection, { marginTop: 10 }]}>
-                            <View style={styles.pelangganCoordBox}>
-                              <View style={styles.pelangganCoordIconCircle}>
-                                <Ionicons name="location" size={18} color="#EF4444" />
-                              </View>
-                              <View style={styles.pelangganCoordTextContainer}>
-                                <Text style={styles.pelangganCoordTitle}>Koordinat Terpilih</Text>
-                                <Text style={styles.pelangganCoordValue}>{tagihan.koordinat}</Text>
-                              </View>
-                              <TouchableOpacity
-                                style={styles.pelangganBukaPetaBtn}
-                                activeOpacity={0.8}
-                                onPress={() => {
-                                  const clean = String(tagihan.koordinat || '').replace(/[()]/g, '').trim();
-                                  if (Platform.OS === 'web') {
-                                    window.open(
-                                      `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`,
-                                      '_blank'
-                                    );
-                                  } else {
-                                    Linking.openURL(
-                                      `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`
-                                    );
-                                  }
-                                }}
-                              >
-                                <Text style={styles.pelangganBukaPetaBtnText}>Buka Maps</Text>
-                                <Ionicons
-                                  name="open-outline"
-                                  size={12}
-                                  color="#07326E"
-                                  style={{ marginLeft: 3 }}
-                                />
-                              </TouchableOpacity>
-                            </View>
-                          </View>
-                        ) : null}
-                      </View>
-                    ) : null}
-                  </View>
-                ))}
+                      ) : null}
+                    </View>
+                  );
+                })}
               </View>
             )}
           </View>
@@ -1682,41 +2308,6 @@ function MainApp() {
 
   // Form: Rute Tagihan Pelanggan (Google Maps Real-Time)
   if (currentScreen === 'rute_tagihan') {
-    // Sesuaikan data koordinat pelanggan dengan periode yang dipilih (hanya pelanggan pada periode bulan & tahun ini)
-    const rutePelanggan = (() => {
-      const map = new Map();
-
-      // 1. Ambil data pelanggan yang terdaftar pada periode terpilih dari daftarTagihanPelanggan
-      daftarTagihanPelanggan.forEach((t) => {
-        if (
-          t &&
-          t.periodeBulan === selectedMonth &&
-          t.periodeTahun === selectedYear
-        ) {
-          const key = t.tagihanId || t.id || t.nama;
-          if (key && !map.has(key)) {
-            map.set(key, t);
-          }
-        }
-      });
-
-      // 2. Ambil juga jika ada data di daftarPelanggan yang secara spesifik memiliki periode yang sesuai
-      daftarPelanggan.forEach((p) => {
-        if (
-          p &&
-          p.periodeBulan === selectedMonth &&
-          p.periodeTahun === selectedYear
-        ) {
-          const key = p.tagihanId || p.id || p.nama;
-          if (key && !map.has(key)) {
-            map.set(key, p);
-          }
-        }
-      });
-
-      return Array.from(map.values());
-    })();
-
     return (
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right', 'bottom']}>
         <StatusBar style="dark" backgroundColor="#FFFFFF" />
@@ -1767,6 +2358,8 @@ function MainApp() {
       </SafeAreaView>
     );
   }
+
+
 
   // Form: Data Pelanggan (Tanpa proses apapun)
   if (currentScreen === 'data_pelanggan') {
@@ -1843,7 +2436,7 @@ function MainApp() {
             )}
           </View>
 
-          {/* List Data Pelanggan atau Empty State */}
+          {/* List Data Pelanggan atau Empty State (Virtualisasi FlatList berkecepatan tinggi) */}
           {filteredPelanggan.length === 0 ? (
             <View style={styles.pelangganEmptyCenter}>
               {/* Circular People Avatar */}
@@ -1862,138 +2455,23 @@ function MainApp() {
               </Text>
             </View>
           ) : (
-            <ScrollView
+            <FlatList
+              data={filteredPelanggan}
+              keyExtractor={(item) => String(item.id)}
+              renderItem={renderPelangganCard}
               style={styles.pelangganListContainer}
               contentContainerStyle={styles.pelangganListContent}
               showsVerticalScrollIndicator={false}
-            >
-              {filteredPelanggan.map((item) => {
-                const isItemSelected = selectedPelangganIds.includes(item.id);
-                return (
-                  <View
-                    key={item.id}
-                    style={[
-                      styles.pelangganItemCard,
-                      isItemSelected && styles.pelangganItemCardSelected,
-                    ]}
-                  >
-                    {/* Baris 1: No. SMB & Nama Pelanggan di Baris Satu, Aksi di Kanan (Tanpa Chevron) */}
-                    <View style={styles.pelangganItemRow1}>
-                      <View style={styles.pelangganItemRow1Left}>
-                        {/* Tombol Ceklist per Data Pelanggan */}
-                        <TouchableOpacity
-                          activeOpacity={0.7}
-                          onPress={() => toggleSelectPelanggan(item.id)}
-                          style={styles.pelangganCheckboxBtn}
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                        >
-                          <Ionicons
-                            name={isItemSelected ? 'checkmark-circle' : 'ellipse-outline'}
-                            size={21}
-                            color={isItemSelected ? '#10B981' : '#94A3B8'}
-                          />
-                        </TouchableOpacity>
-
-                        <View style={styles.pelangganNoSmbBadge}>
-                          <Text style={styles.pelangganNoSmbText}>{item.noSmb}</Text>
-                        </View>
-
-                        <TouchableOpacity
-                          activeOpacity={0.7}
-                          onPress={() => {
-                            if (selectedPelangganIds.length > 0) {
-                              toggleSelectPelanggan(item.id);
-                            } else {
-                              setExpandedPelangganId(expandedPelangganId === item.id ? null : item.id);
-                            }
-                          }}
-                          style={styles.pelangganNameInlineWrapper}
-                        >
-                          <Text style={styles.pelangganItemNameInline} numberOfLines={1}>
-                            {item.nama}
-                          </Text>
-                        </TouchableOpacity>
-                      </View>
-
-                      <View style={styles.pelangganTopActionRow}>
-                        {/* Tombol Add ke Daftar Tagihan (Selalu icon +, tidak berubah centang) */}
-                        <TouchableOpacity
-                          style={styles.pelangganAddBtn}
-                          activeOpacity={0.7}
-                          onPress={() => handleOpenTransferModal(item)}
-                        >
-                          <Ionicons
-                            name="add"
-                            size={16}
-                            color="#07326E"
-                          />
-                        </TouchableOpacity>
-
-                        {/* Icon Chevron dihapus untuk menghemat ruang */}
-
-                        <TouchableOpacity
-                          onPress={() => handleDeletePelanggan(item.id)}
-                          activeOpacity={0.7}
-                          style={styles.pelangganDeleteBtn}
-                        >
-                          <Ionicons name="trash-outline" size={15} color="#EF4444" />
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-
-                    {/* Baris 2: Alamat Pelanggan */}
-                    <TouchableOpacity
-                      activeOpacity={selectedPelangganIds.length > 0 ? 0.7 : 0.85}
-                      onPress={() => {
-                        if (selectedPelangganIds.length > 0) {
-                          toggleSelectPelanggan(item.id);
-                        } else {
-                          setExpandedPelangganId(expandedPelangganId === item.id ? null : item.id);
-                        }
-                      }}
-                      style={styles.pelangganAddressRow}
-                    >
-                      <Text style={styles.pelangganItemAddressText} numberOfLines={2}>
-                        {item.alamat}
-                      </Text>
-                    </TouchableOpacity>
-
-                    {/* Detail: Titik Koordinat (Hanya muncul jika Nama Pelanggan diklik) */}
-                    {expandedPelangganId === item.id && (
-                      <View style={styles.pelangganDetailContainer}>
-                        {/* Titik Koordinat Sesuai Pilihan */}
-                        <View style={styles.pelangganDetailSection}>
-                          <View style={styles.pelangganCoordBox}>
-                            <View style={styles.pelangganCoordIconCircle}>
-                              <Ionicons name="location" size={18} color="#EF4444" />
-                            </View>
-                            <View style={styles.pelangganCoordTextContainer}>
-                              <Text style={styles.pelangganCoordTitle}>Koordinat Terpilih</Text>
-                              <Text style={styles.pelangganCoordValue}>{item.koordinat}</Text>
-                            </View>
-                            <TouchableOpacity
-                              style={styles.pelangganBukaPetaBtn}
-                              activeOpacity={0.8}
-                              onPress={() => {
-                                const clean = String(item.koordinat || '').replace(/[()]/g, '').trim();
-                                if (Platform.OS === 'web') {
-                                  window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`, '_blank');
-                                } else {
-                                  Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`);
-                                }
-                              }}
-                            >
-                              <Text style={styles.pelangganBukaPetaBtnText}>Buka Maps</Text>
-                              <Ionicons name="open-outline" size={12} color="#07326E" style={{ marginLeft: 3 }} />
-                            </TouchableOpacity>
-                          </View>
-                        </View>
-                      </View>
-                    )}
-                  </View>
-                );
-              })}
-            </ScrollView>
+              initialNumToRender={15}
+              maxToRenderPerBatch={15}
+              windowSize={7}
+              removeClippedSubviews={Platform.OS === 'android'}
+              keyboardShouldPersistTaps="handled"
+              extraData={{
+                expandedPelangganId,
+                selectedCount: selectedPelangganIds.length,
+              }}
+            />
           )}
 
           {/* Bar Tindakan Kolektif Pelanggan (Muncul jika ada data yang diceklist) */}
@@ -2118,6 +2596,9 @@ function MainApp() {
               onChangeText={handleNomorSmbChange}
               maxLength={8}
               keyboardType="numeric"
+              returnKeyType="next"
+              blurOnSubmit={false}
+              onSubmitEditing={() => namaInputRef.current?.focus()}
             />
             <Text style={styles.formManualHelperText}>
               2 Digit : Zona, 5 Digit : Nomor Reg
@@ -2128,11 +2609,15 @@ function MainApp() {
           <View style={styles.formManualGroup}>
             <Text style={styles.formManualLabel}>Nama Pelanggan</Text>
             <TextInput
+              ref={namaInputRef}
               style={styles.formManualInputFull}
-              placeholder="Masukkan nama lengkap pelanggan"
+              placeholder="Masukkan nama pelanggan (opsional, default: Super Pelanggan)"
               placeholderTextColor="#8E9CAE"
               value={manualNama}
               onChangeText={setManualNama}
+              returnKeyType="next"
+              blurOnSubmit={false}
+              onSubmitEditing={() => alamatInputRef.current?.focus()}
             />
           </View>
 
@@ -2140,11 +2625,13 @@ function MainApp() {
           <View style={styles.formManualGroup}>
             <Text style={styles.formManualLabel}>Alamat</Text>
             <TextInput
+              ref={alamatInputRef}
               style={styles.formManualInputFull}
               placeholder="Masukkan alamat lengkap pelanggan"
               placeholderTextColor="#8E9CAE"
               value={manualAlamat}
               onChangeText={setManualAlamat}
+              returnKeyType="done"
             />
           </View>
 

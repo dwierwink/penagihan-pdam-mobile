@@ -6,7 +6,9 @@ Aplikasi mobile penagihan PDAM yang dirancang untuk petugas lapangan, dilengkapi
 
 - **Master Database Pelanggan**:
   - Tambah data pelanggan manual dengan format otomatis Nomor SMB (`xx-xxxxx`).
-  - Import file Excel data pelanggan (No. SMB, Nama, Alamat, Latitude, Longitude).
+  - Pencegahan data ganda Nomor SMB (feedback pemberitahuan instan jika nomor SMB sudah terdaftar).
+  - Import file Excel data pelanggan (No. SMB, Nama, Alamat, Latitude, Longitude) dengan filter duplikasi otomatis.
+  - Penyimpanan permanen di memori internal HP (`PenagihanPDAM/database/` dan `PenagihanPDAM/foto_persil/`) sehingga data tidak hilang saat aplikasi ditutup.
   - Mode seleksi: ceklist satuan dan ceklist semua untuk penghapusan data secara kolektif.
   - Pencarian instan berdasarkan nama, alamat, atau nomor sambungan.
 

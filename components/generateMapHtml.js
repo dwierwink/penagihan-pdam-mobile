@@ -26,7 +26,8 @@ export function getMapHtml(initialCoords, customers = []) {
             lat = c.lat;
             lng = c.lng;
           } else if (c.koordinat && typeof c.koordinat === 'string') {
-            const parts = c.koordinat.split(',').map((s) => parseFloat(s.trim()));
+            const cleanStr = c.koordinat.replace(/[()]/g, '');
+            const parts = cleanStr.split(',').map((s) => parseFloat(s.trim()));
             if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
               lat = parts[0];
               lng = parts[1];
@@ -36,6 +37,7 @@ export function getMapHtml(initialCoords, customers = []) {
           return {
             id: String(c.id || c.tagihanId || Math.random()),
             nama: String(c.nama || c.name || 'Pelanggan'),
+            noSmb: String(c.noSmb || c.smb || c.nomorSmb || c.no_smb || c.nosmb || ''),
             lat,
             lng,
           };
@@ -227,7 +229,11 @@ export function getMapHtml(initialCoords, customers = []) {
       transform: scale(0.92);
     }
 
-    /* Custom GPS Marker Pulse Radar */
+    /* Custom GPS Marker Pulse Radar dengan Pergerakan Halus */
+    .gps-ring-container {
+      transition: transform 0.6s cubic-bezier(0.25, 0.1, 0.25, 1);
+      pointer-events: none;
+    }
     .gps-marker-ring {
       width: 28px;
       height: 28px;
@@ -356,21 +362,7 @@ export function getMapHtml(initialCoords, customers = []) {
     document.getElementById('fab-layer').addEventListener('click', toggleLayer);
     document.getElementById('chip-layer').addEventListener('click', toggleLayer);
 
-    // 2. Marker Pin Utama & Marker GPS
-    const customIcon = L.icon({
-      iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-      shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-      iconSize: [25, 41],
-      iconAnchor: [12, 41],
-      popupAnchor: [1, -34],
-      shadowSize: [41, 41]
-    });
-
-    let activeMarker = L.marker([currentLat, currentLng], {
-      icon: customIcon,
-      draggable: true
-    }).addTo(map);
-
+    // 2. Marker Radar GPS Saya & Variabel Rute
     let gpsRadarMarker = null;
     let gpsAccuracyCircle = null;
 
@@ -380,9 +372,29 @@ export function getMapHtml(initialCoords, customers = []) {
     let routePolyline = null;
     let isRouteVisible = true;
     let currentValidCustomers = [];
+    let hasFittedInitialBounds = false;
+    let isFetchingRoute = false;
+    let lastRouteOriginLat = null;
+    let lastRouteOriginLng = null;
+    let lastPanLat = null;
+    let lastPanLng = null;
+    let hasReceivedNativeGps = false;
+
+    // Perhitungan jarak meter antara dua koordinat (Haversine)
+    function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
 
     // Baca dan gambar rute jalan asli dari lokasi saya ke pelanggan via OSRM (BUKAN garis lurus)
-    function fetchAndDrawRoadRoute(originLat, originLng, custList) {
+    function fetchAndDrawRoadRoute(originLat, originLng, custList, shouldFitBounds = false) {
       if (!isRouteVisible) return;
       if (!Array.isArray(custList) || custList.length === 0) return;
       if (typeof originLat !== 'number' || typeof originLng !== 'number') return;
@@ -397,6 +409,8 @@ export function getMapHtml(initialCoords, customers = []) {
         chip.innerText = '⏳ Membaca Rute Jalan...';
       }
 
+      isFetchingRoute = true;
+
       // Susun titik waypoints rute jalan mulai dari Lokasi Saya (origin) -> pelanggan
       // Format OSRM: lng,lat;lng,lat...
       const waypoints = [
@@ -409,25 +423,24 @@ export function getMapHtml(initialCoords, customers = []) {
       fetch(osrmUrl)
         .then(res => res.json())
         .then(data => {
+          isFetchingRoute = false;
           if (data && data.code === 'Ok' && data.routes && data.routes[0]) {
             const route = data.routes[0];
-            // Koordinat rute mengikuti lekukan jalan raya/gang asli (BUKAN garis lurus)
             const roadPoints = route.geometry.coordinates.map(pt => [pt[1], pt[0]]);
 
             if (routePolyline) {
               map.removeLayer(routePolyline);
             }
 
-            // Gambar rute jalan raya yang akan dilewati
+            // Gambar rute jalan raya dengan style modern yang halus
             routePolyline = L.polyline(roadPoints, {
               color: '#0284c7',
               weight: 5,
-              opacity: 0.9,
+              opacity: 0.88,
               lineJoin: 'round',
               lineCap: 'round'
             }).addTo(map);
 
-            // Baca jarak rute jalan riil dari lokasi saya
             const distMeters = route.distance;
             const distFormatted = distMeters < 1000
               ? Math.round(distMeters) + ' m'
@@ -438,17 +451,19 @@ export function getMapHtml(initialCoords, customers = []) {
               chip.classList.add('active');
             }
 
-            // Sesuaikan batas kamera agar lokasi saya dan rute jalan pelanggan terlihat jelas
-            if (roadPoints.length > 0) {
+            // HANYA sesuaikan batas kamera (fitBounds) jika secara eksplisit diminta (misal: saat pertama kali buka atau klik tombol rute)
+            // JANGAN PERNAH panggil fitBounds pada pergerakan GPS berkala agar peta tidak loncat-loncat!
+            if (shouldFitBounds && roadPoints.length > 0) {
               const allBounds = L.latLngBounds(roadPoints);
               allBounds.extend([originLat, originLng]);
-              map.fitBounds(allBounds, { padding: [50, 50], maxZoom: 17 });
+              map.fitBounds(allBounds, { padding: [50, 50], maxZoom: 16 });
             }
           } else {
             if (chip) chip.innerText = '🛣️ Rute Jalan (' + validTargets.length + ' Pelanggan)';
           }
         })
         .catch(err => {
+          isFetchingRoute = false;
           console.warn('Gagal membaca rute jalan OSRM:', err);
           if (chip) chip.innerText = '🛣️ Rute Jalan (' + validTargets.length + ' Pelanggan)';
         });
@@ -475,7 +490,8 @@ export function getMapHtml(initialCoords, customers = []) {
           lat = c.latitude;
           lng = c.longitude;
         } else if (c.koordinat && typeof c.koordinat === 'string') {
-          const parts = c.koordinat.split(',').map(s => parseFloat(s.trim()));
+          const cleanStr = c.koordinat.replace(/[()]/g, '');
+          const parts = cleanStr.split(',').map(s => parseFloat(s.trim()));
           if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
             lat = parts[0];
             lng = parts[1];
@@ -485,6 +501,7 @@ export function getMapHtml(initialCoords, customers = []) {
         return {
           id: c.id || c.tagihanId || '',
           nama: c.nama || c.name || 'Pelanggan',
+          noSmb: c.noSmb || c.smb || c.nomorSmb || c.no_smb || c.nosmb || '',
           lat: lat,
           lng: lng
         };
@@ -493,7 +510,8 @@ export function getMapHtml(initialCoords, customers = []) {
       currentValidCustomers = validList;
 
       validList.forEach((cust) => {
-        const customerName = cust.nama || 'Pelanggan';
+        // Tampilkan nomor SMB pelanggan pada maps rute tagihan sesuai instruksi
+        const customerSmb = cust.noSmb || cust.nama || 'Pelanggan';
 
         // Pin Marker Pelanggan PDAM Sesuai Koordinat Asli
         const customerPinIcon = L.icon({
@@ -508,25 +526,25 @@ export function getMapHtml(initialCoords, customers = []) {
 
         const m = L.marker([cust.lat, cust.lng], { icon: customerPinIcon }).addTo(map);
 
-        // Hanya cantumkan nama pelanggan saja sesuai instruksi
-        m.bindTooltip(customerName, {
+        // Hanya cantumkan nomor SMB pelanggan saja sesuai instruksi
+        m.bindTooltip(customerSmb, {
           permanent: true,
           direction: 'top',
           className: 'customer-name-tooltip',
           offset: [0, -10]
         });
 
-        // Popup saat marker diklik hanya menampilkan nama pelanggan saja
+        // Popup saat marker diklik menampilkan nomor SMB pelanggan
         m.bindPopup(
           '<div style="font-size:13px; font-weight:700; color:#07326E; text-align:center; padding:3px 6px;">' +
-            customerName +
+            customerSmb +
           '</div>'
         );
 
         m.on('click', () => {
-          updateCoordinateInfo(cust.lat, cust.lng, customerName);
-          // Baca rute jalan khusus dari posisi saya ke pelanggan ini (bukan garis lurus)
-          fetchAndDrawRoadRoute(currentLat, currentLng, [cust]);
+          updateCoordinateInfo(cust.lat, cust.lng, customerSmb);
+          // Baca rute jalan khusus dari posisi saya ke pelanggan ini
+          fetchAndDrawRoadRoute(currentLat, currentLng, [cust], true);
         });
 
         customerMarkers.push(m);
@@ -534,7 +552,9 @@ export function getMapHtml(initialCoords, customers = []) {
 
       // Baca & gambar rute jalan asli dari lokasi saya ke pelanggan
       if (validList.length > 0) {
-        fetchAndDrawRoadRoute(currentLat, currentLng, validList);
+        const fitFirstTime = !hasFittedInitialBounds;
+        if (fitFirstTime) hasFittedInitialBounds = true;
+        fetchAndDrawRoadRoute(currentLat, currentLng, validList, fitFirstTime);
       } else {
         const chip = document.getElementById('chip-rute');
         if (chip) chip.innerText = '🛣️ Rute Jalan (0 Pelanggan)';
@@ -547,7 +567,7 @@ export function getMapHtml(initialCoords, customers = []) {
       if (isRouteVisible) {
         customerMarkers.forEach(m => map.addLayer(m));
         if (currentValidCustomers.length > 0) {
-          fetchAndDrawRoadRoute(currentLat, currentLng, currentValidCustomers);
+          fetchAndDrawRoadRoute(currentLat, currentLng, currentValidCustomers, true);
         }
         if (chip) chip.classList.add('active');
       } else {
@@ -562,20 +582,21 @@ export function getMapHtml(initialCoords, customers = []) {
 
     document.getElementById('chip-rute').addEventListener('click', toggleRoute);
 
-    // 4. Update Koordinat Real-Time
+    // 4. Update Koordinat
     function updateCoordinateInfo(lat, lng, label, accuracy) {
       currentLat = lat;
       currentLng = lng;
-      if (activeMarker) activeMarker.setLatLng([lat, lng]);
     }
 
-    // 5. Menerima Koordinat Real-Time dari Native / Host App
+    // 5. Menerima Koordinat Real-Time dari Native / Host App (Ultra Smooth)
     window.handleLocationUpdate = function(lat, lng, accuracy) {
       if (typeof lat !== 'number' || typeof lng !== 'number') return;
+      hasReceivedNativeGps = true;
+
       currentLat = lat;
       currentLng = lng;
 
-      // Update radar marker
+      // 1. Update radar marker posisi saya dengan transisi halus
       if (!gpsRadarMarker) {
         const gpsIcon = L.divIcon({
           className: 'gps-ring-container',
@@ -583,20 +604,20 @@ export function getMapHtml(initialCoords, customers = []) {
           iconSize: [28, 28],
           iconAnchor: [14, 14]
         });
-        gpsRadarMarker = L.marker([lat, lng], { icon: gpsIcon }).addTo(map);
+        gpsRadarMarker = L.marker([lat, lng], { icon: gpsIcon, zIndexOffset: 1000 }).addTo(map);
       } else {
         gpsRadarMarker.setLatLng([lat, lng]);
       }
 
-      // Update lingkaran akurasi GPS
-      if (typeof accuracy === 'number' && accuracy > 0) {
+      // 2. Update lingkaran akurasi GPS jika akurasi wajar (< 100m)
+      if (typeof accuracy === 'number' && accuracy > 0 && accuracy < 100) {
         if (!gpsAccuracyCircle) {
           gpsAccuracyCircle = L.circle([lat, lng], {
             radius: accuracy,
             color: '#2563eb',
             weight: 1.5,
             fillColor: '#3b82f6',
-            fillOpacity: 0.12
+            fillOpacity: 0.08
           }).addTo(map);
         } else {
           gpsAccuracyCircle.setLatLng([lat, lng]);
@@ -604,24 +625,31 @@ export function getMapHtml(initialCoords, customers = []) {
         }
       }
 
-      // Update teks koordinat
-      updateCoordinateInfo(lat, lng, '📍 Posisi GPS Anda (Real-Time)', accuracy);
-
-      // Jika mode ikuti aktif: geser kamera peta secara real-time mengikuti pergerakan Anda
+      // 3. Smooth Camera Follow: hanya geser kamera jika followUser aktif dan pengguna berpindah minimal 5 meter
+      // Mencegah jitter/getaran sensor GPS saat diam di tempat
       if (followUser) {
-        map.panTo([lat, lng], { animate: true, duration: 0.8 });
+        let distFromLastPan = 999;
+        if (lastPanLat !== null && lastPanLng !== null) {
+          distFromLastPan = calculateDistanceMeters(lastPanLat, lastPanLng, lat, lng);
+        }
+        if (distFromLastPan >= 5) {
+          lastPanLat = lat;
+          lastPanLng = lng;
+          map.panTo([lat, lng], { animate: true, duration: 1.0, easeLinearity: 0.25 });
+        }
       }
 
-      // Update rute jalan dari posisi GPS terbaru pengguna secara real-time
-      if (currentValidCustomers && currentValidCustomers.length > 0 && isRouteVisible) {
-        fetchAndDrawRoadRoute(lat, lng, currentValidCustomers);
-      }
-
-      // Saat pertama kali mendapat lokasi asli:
-      if (!hasInitializedRoute) {
-        hasInitializedRoute = true;
-        if (customerMarkers.length === 0) {
-          map.setView([lat, lng], 16);
+      // 4. Update rute jalan asli hanya jika jarak berpindah minimal 25 meter dari rute sebelumnya
+      // Ini menjaga agar rute jalan tetap stabil tanpa berkedip / reload setiap detik
+      if (currentValidCustomers && currentValidCustomers.length > 0 && isRouteVisible && !isFetchingRoute) {
+        let distFromLastRoute = 999;
+        if (lastRouteOriginLat !== null && lastRouteOriginLng !== null) {
+          distFromLastRoute = calculateDistanceMeters(lastRouteOriginLat, lastRouteOriginLng, lat, lng);
+        }
+        if (distFromLastRoute >= 25) {
+          lastRouteOriginLat = lat;
+          lastRouteOriginLng = lng;
+          fetchAndDrawRoadRoute(lat, lng, currentValidCustomers, false);
         }
       }
     };
@@ -650,11 +678,12 @@ export function getMapHtml(initialCoords, customers = []) {
     window.addEventListener('message', handleMessageEvent);
     document.addEventListener('message', handleMessageEvent);
 
-    // 6. Geolocation Otomatis Mandiri di Browser / WebView
+    // 6. Geolocation Otomatis Mandiri di Browser / WebView (Hanya aktif jika native GPS belum aktif)
     function triggerAutoGPS() {
       if (navigator.geolocation) {
         navigator.geolocation.watchPosition(
           function(pos) {
+            if (hasReceivedNativeGps) return; // Prioritaskan GPS Native dari host app
             window.handleLocationUpdate(
               pos.coords.latitude,
               pos.coords.longitude,
@@ -664,7 +693,7 @@ export function getMapHtml(initialCoords, customers = []) {
           function(err) {
             console.warn('Geolocation warning:', err);
           },
-          { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 2000 }
         );
       }
     }
@@ -673,6 +702,8 @@ export function getMapHtml(initialCoords, customers = []) {
     // 7. Toggle Mode "Ikuti Posisi Saya"
     function toggleFollowUser() {
       followUser = true;
+      lastPanLat = currentLat;
+      lastPanLng = currentLng;
       const chipFollow = document.getElementById('chip-follow');
       if (chipFollow) {
         chipFollow.classList.add('following');
@@ -681,8 +712,7 @@ export function getMapHtml(initialCoords, customers = []) {
       const fabGps = document.getElementById('fab-gps');
       if (fabGps) fabGps.classList.add('active-tracking');
 
-      map.setView([currentLat, currentLng], 17, { animate: true });
-      updateCoordinateInfo(currentLat, currentLng, '📍 Posisi GPS Anda (Real-Time)');
+      map.flyTo([currentLat, currentLng], 17, { duration: 1.0 });
     }
 
     document.getElementById('chip-follow').addEventListener('click', toggleFollowUser);
@@ -702,11 +732,6 @@ export function getMapHtml(initialCoords, customers = []) {
 
     map.on('click', function(e) {
       updateCoordinateInfo(e.latlng.lat, e.latlng.lng, 'Titik Dipilih Manual');
-    });
-
-    activeMarker.on('dragend', function(e) {
-      const pos = e.target.getLatLng();
-      updateCoordinateInfo(pos.lat, pos.lng, 'Titik Digeser');
     });
 
     // 8. Fitur Pencarian Alamat & Koordinat
