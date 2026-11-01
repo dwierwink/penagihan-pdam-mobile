@@ -15,9 +15,10 @@ import {
   Linking,
   BackHandler,
   ToastAndroid,
+  ActivityIndicator,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { SafeAreaProvider, SafeAreaView, initialWindowMetrics } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView, initialWindowMetrics, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
@@ -484,6 +485,7 @@ const compressAndSaveFotoPersil = async (sourceUri, identifier) => {
 };
 
 function MainApp() {
+  const insets = useSafeAreaInsets();
   // Navigation state: 'home' | 'daftar_tagihan' | 'rute_tagihan'
   const [currentScreen, setCurrentScreen] = useState('home');
   const [modalVisible, setModalVisible] = useState(false);
@@ -498,21 +500,25 @@ function MainApp() {
   const [pendingPelanggan, setPendingPelanggan] = useState(null);
   const [modalYear, setModalYear] = useState(2026);
 
-  // User real-time high-accuracy GPS location
+  // User real-time high-accuracy GPS location & heading
   const [userLocation, setUserLocation] = useState(null);
+  const [userHeading, setUserHeading] = useState(null);
 
   // Master Data Pelanggan State
   const [daftarPelanggan, setDaftarPelanggan] = useState([]);
   const [selectedPelangganIds, setSelectedPelangganIds] = useState([]);
   const [pelangganSearchQuery, setPelangganSearchQuery] = useState('');
+  const [tagihanSearchQuery, setTagihanSearchQuery] = useState('');
   const [expandedPelangganId, setExpandedPelangganId] = useState(null);
   const [expandedTagihanId, setExpandedTagihanId] = useState(null);
 
   // Daftar Tagihan Pelanggan (Hasil transfer dari Data Pelanggan)
   const [daftarTagihanPelanggan, setDaftarTagihanPelanggan] = useState([]);
+  const [selectedTagihanIds, setSelectedTagihanIds] = useState([]);
   const [fotoPersilByPelanggan, setFotoPersilByPelanggan] = useState({}); // Cache foto persil per pelanggan (otomatis tersimpan lintas periode)
   const [selectedPhotoFull, setSelectedPhotoFull] = useState(null); // Modal fullscreen viewer foto persil
   const [successModalData, setSuccessModalData] = useState(null); // Modal popup "Berhasil Ditambahkan"
+  const [tsNoticeModalVisible, setTsNoticeModalVisible] = useState(false); // Modal popup pemberitahuan TS
 
   // Jarak rute jalan riil dari lokasi saya ke masing-masing pelanggan (bukan garis lurus)
   const [roadDistances, setRoadDistances] = useState({});
@@ -573,24 +579,79 @@ function MainApp() {
   // Data pelanggan untuk rute tagihan sesuai periode aktif (dimemoize agar tidak re-render berulang kali saat GPS bergerak)
   const rutePelanggan = useMemo(() => {
     const map = new Map();
+    const selesaiSmbSet = new Set();
+    const selesaiIdSet = new Set();
+
     daftarTagihanPelanggan.forEach((t) => {
       if (t && t.periodeBulan === selectedMonth && t.periodeTahun === selectedYear) {
+        if (t.isSelesai || t.statusSelesai === 'selesai') {
+          if (t.noSmb) selesaiSmbSet.add(t.noSmb);
+          if (t.id) selesaiIdSet.add(t.id);
+          return; // Selesai: Otomatis hilang dari peta rute
+        }
         const key = t.tagihanId || t.id || t.noSmb || t.nama;
         if (key && !map.has(key)) {
-          map.set(key, t);
+          const foto =
+            t.fotoPersil ||
+            (t.noSmb && fotoPersilByPelanggan[t.noSmb]) ||
+            (t.id && fotoPersilByPelanggan[t.id]) ||
+            null;
+          map.set(key, { ...t, fotoPersil: foto });
         }
       }
     });
     daftarPelanggan.forEach((p) => {
       if (p && p.periodeBulan === selectedMonth && p.periodeTahun === selectedYear) {
+        if (
+          p.isSelesai ||
+          p.statusSelesai === 'selesai' ||
+          (p.noSmb && selesaiSmbSet.has(p.noSmb)) ||
+          (p.id && selesaiIdSet.has(p.id))
+        ) {
+          return; // Selesai: Otomatis hilang dari peta rute
+        }
         const key = p.tagihanId || p.id || p.noSmb || p.nama;
         if (key && !map.has(key)) {
-          map.set(key, p);
+          const foto =
+            p.fotoPersil ||
+            (p.noSmb && fotoPersilByPelanggan[p.noSmb]) ||
+            (p.id && fotoPersilByPelanggan[p.id]) ||
+            null;
+          map.set(key, { ...p, fotoPersil: foto });
         }
       }
     });
     return Array.from(map.values());
-  }, [daftarTagihanPelanggan, daftarPelanggan, selectedMonth, selectedYear]);
+  }, [daftarTagihanPelanggan, daftarPelanggan, selectedMonth, selectedYear, fotoPersilByPelanggan]);
+
+  // Handler untuk menampilkan foto persil saat nomor SMB pada rute tagihan diklik
+  const handleOpenFotoPersilFromMap = (data) => {
+    if (!data) return;
+    const smb = data.noSmb || data.nama || '';
+    const custId = data.id || '';
+
+    const photoUri =
+      data.fotoPersil ||
+      (smb && fotoPersilByPelanggan[smb]) ||
+      (custId && fotoPersilByPelanggan[custId]) ||
+      daftarTagihanPelanggan.find((t) => (smb && t.noSmb === smb) || (custId && t.id === custId))?.fotoPersil ||
+      daftarPelanggan.find((p) => (smb && p.noSmb === smb) || (custId && p.id === custId))?.fotoPersil ||
+      null;
+
+    if (photoUri) {
+      setSelectedPhotoFull({
+        uri: photoUri,
+        title: `Foto Persil - ${smb ? `SMB ${smb}` : data.nama || 'Pelanggan'}`,
+      });
+    } else {
+      const msg = `Foto persil untuk No. SMB ${smb || data.nama || ''} belum tersedia. Silakan ambil foto persil di menu Daftar Tagihan.`;
+      if (Platform.OS === 'web') {
+        alert(msg);
+      } else {
+        Alert.alert('Foto Persil', msg);
+      }
+    }
+  };
 
   // Android Back button handler: jangan langsung keluar aplikasi jika ditekan tombol back
   const lastBackPressRef = useRef(0);
@@ -616,15 +677,24 @@ function MainApp() {
         return true;
       }
 
-      // 4. Jika modal berhasil terbuka -> tutup modal
+      // 4. Jika modal berhasil / modal TS terbuka -> tutup modal
+      if (tsNoticeModalVisible) {
+        setTsNoticeModalVisible(false);
+        return true;
+      }
       if (successModalData) {
         setSuccessModalData(null);
         return true;
       }
 
-      // 5. Jika berada di pemilih titik maps -> kembali ke form manual
+      // 5. Jika berada di pemilih titik maps -> kembali ke form manual / data pelanggan
       if (currentScreen === 'pilih_titik_alamat') {
-        setCurrentScreen('tambah_pelanggan_manual');
+        if (editingPelangganForMap) {
+          setEditingPelangganForMap(null);
+          setCurrentScreen('data_pelanggan');
+        } else {
+          setCurrentScreen('tambah_pelanggan_manual');
+        }
         return true;
       }
 
@@ -644,8 +714,12 @@ function MainApp() {
         return true;
       }
 
-      // 8. Jika berada di daftar tagihan -> kembali ke home
+      // 8. Jika berada di daftar tagihan
       if (currentScreen === 'daftar_tagihan') {
+        if (selectedTagihanIds.length > 0) {
+          setSelectedTagihanIds([]);
+          return true;
+        }
         setCurrentScreen('home');
         return true;
       }
@@ -696,31 +770,47 @@ function MainApp() {
   const namaInputRef = useRef(null);
   const alamatInputRef = useRef(null);
 
-  // Formatter input Nomor SMB: otomatis gabungkan 2 digit awal dan 5 digit akhir dengan simbol (-)
-  const handleNomorSmbChange = (text) => {
-    const isDeleting = text.length < manualNomorSmb.length;
+  // Helper formatter input Nomor SMB (xx-xxxxx): otomatis sisipkan (-) setelah 2 digit awal dan dilanjut 5 digit akhir
+  const formatNomorSmbValue = (text, prevText = '') => {
+    const isDeleting = text.length < prevText.length;
     const digits = text.replace(/\D/g, '').slice(0, 7);
     if (!digits) {
-      setManualNomorSmb('');
-      return;
+      return '';
     }
     if (digits.length <= 2) {
       if (!isDeleting && digits.length === 2) {
-        setManualNomorSmb(`${digits}-`);
-      } else {
-        setManualNomorSmb(digits);
+        return `${digits}-`;
       }
-      return;
+      return digits;
     }
-    const formatted = `${digits.slice(0, 2)}-${digits.slice(2)}`;
+    return `${digits.slice(0, 2)}-${digits.slice(2)}`;
+  };
+
+  // Formatter input Nomor SMB pada form tambah pelanggan manual
+  const handleNomorSmbChange = (text) => {
+    const isDeleting = text.length < manualNomorSmb.length;
+    const formatted = formatNomorSmbValue(text, manualNomorSmb);
     setManualNomorSmb(formatted);
 
     // Jika nomor SMB sudah terisi penuh (7 digit), otomatis pindah selanjutnya ke kolom Nama Pelanggan
+    const digits = text.replace(/\D/g, '').slice(0, 7);
     if (!isDeleting && digits.length === 7) {
       setTimeout(() => {
         namaInputRef.current?.focus();
       }, 50);
     }
+  };
+
+  // Handler search bar Nomor SMB pada Data Pelanggan
+  const handleSearchPelangganSmbChange = (text) => {
+    const formatted = formatNomorSmbValue(text, pelangganSearchQuery);
+    setPelangganSearchQuery(formatted);
+  };
+
+  // Handler search bar Nomor SMB pada Daftar Tagihan
+  const handleSearchTagihanSmbChange = (text) => {
+    const formatted = formatNomorSmbValue(text, tagihanSearchQuery);
+    setTagihanSearchQuery(formatted);
   };
 
   // Simpan foto persil untuk pelanggan (otomatis tersimpan untuk periode saat ini dan periode selanjutnya)
@@ -941,15 +1031,16 @@ function MainApp() {
     [selectedPelangganIds]
   );
 
-  // Filter pencarian data pelanggan (memoized agar tidak menghitung ulang saat GPS atau state lain berkedip)
+  // Filter pencarian data pelanggan hanya berdasarkan Nomor SMB
   const filteredPelanggan = useMemo(() => {
     if (!pelangganSearchQuery.trim()) return daftarPelanggan;
     const q = pelangganSearchQuery.toLowerCase().trim();
+    const queryDigits = q.replace(/\D/g, '');
     return daftarPelanggan.filter((p) => {
-      const nama = p.nama ? p.nama.toLowerCase() : '';
-      const noSmb = p.noSmb ? p.noSmb.toLowerCase() : '';
-      const alamat = p.alamat ? p.alamat.toLowerCase() : '';
-      return nama.includes(q) || noSmb.includes(q) || alamat.includes(q);
+      if (!p.noSmb) return false;
+      const noSmb = String(p.noSmb).toLowerCase().trim();
+      const noSmbDigits = noSmb.replace(/\D/g, '');
+      return noSmb.includes(q) || (queryDigits.length > 0 && noSmbDigits.includes(queryDigits));
     });
   }, [daftarPelanggan, pelangganSearchQuery]);
 
@@ -1015,6 +1106,118 @@ function MainApp() {
             onPress: executeDelete,
           },
         ]
+      );
+    }
+  };
+
+  // Set untuk pencarian ID tagihan terpilih berkecepatan tinggi O(1)
+  const selectedTagihanSet = useMemo(
+    () => new Set(selectedTagihanIds),
+    [selectedTagihanIds]
+  );
+
+  // Handler toggle ceklist per tagihan pelanggan
+  const toggleSelectTagihan = (id) => {
+    setSelectedTagihanIds((prev) =>
+      prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id]
+    );
+  };
+
+  // Handler ceklist semua / batal ceklist semua data tagihan pelanggan
+  const handleSelectAllTagihan = (list) => {
+    if (!Array.isArray(list) || list.length === 0) return;
+    const isAllSelected =
+      selectedTagihanIds.length >= list.length &&
+      list.every((t) => selectedTagihanSet.has(t.tagihanId || t.id));
+
+    if (isAllSelected) {
+      const currentFilteredKeys = new Set(list.map((t) => t.tagihanId || t.id));
+      setSelectedTagihanIds((prev) => prev.filter((id) => !currentFilteredKeys.has(id)));
+    } else {
+      const visibleKeys = list.map((t) => t.tagihanId || t.id);
+      setSelectedTagihanIds((prev) => Array.from(new Set([...prev, ...visibleKeys])));
+    }
+  };
+
+  // Handler hapus kolektif beberapa tagihan pelanggan yang diceklist
+  const handleDeleteCollectiveTagihan = () => {
+    if (selectedTagihanIds.length === 0) return;
+    const count = selectedTagihanIds.length;
+    const confirmTitle = 'Hapus Tagihan Terpilih';
+    const confirmMessage = `Apakah Anda yakin ingin menghapus ${count} tagihan pelanggan yang diceklist secara bersamaan dari periode ${MONTH_NAMES[selectedMonth]} ${selectedYear}? Data yang dihapus tidak dapat dikembalikan.`;
+
+    const executeDelete = () => {
+      setDaftarTagihanPelanggan((prev) => {
+        const updated = prev.filter(
+          (item) => !selectedTagihanIds.includes(item.tagihanId || item.id)
+        );
+        saveTagihanToInternalStorage(updated);
+        return updated;
+      });
+      if (selectedTagihanIds.includes(expandedTagihanId)) {
+        setExpandedTagihanId(null);
+      }
+      setSelectedTagihanIds([]);
+      if (Platform.OS === 'web') {
+        alert(`${count} tagihan pelanggan berhasil dihapus secara bersamaan.`);
+      } else {
+        Alert.alert('Sukses', `${count} tagihan pelanggan berhasil dihapus secara bersamaan.`);
+      }
+    };
+
+    if (Platform.OS === 'web') {
+      if (window.confirm(`${confirmTitle}\n\n${confirmMessage}`)) {
+        executeDelete();
+      }
+    } else {
+      Alert.alert(
+        confirmTitle,
+        confirmMessage,
+        [
+          { text: 'Batal', style: 'cancel' },
+          {
+            text: `Hapus (${count})`,
+            style: 'destructive',
+            onPress: executeDelete,
+          },
+        ]
+      );
+    }
+  };
+
+  // Handler toggle status selesai pada kartu tagihan (hilang dari peta rute jika selesai, muncul kembali jika batal)
+  const handleToggleStatusSelesaiTagihan = (item) => {
+    if (!item) return;
+    const targetTagihanId = item.tagihanId;
+    const targetId = item.id;
+    const targetSmb = item.noSmb;
+    const nextStatus = !item.isSelesai;
+
+    setDaftarTagihanPelanggan((prev) => {
+      const updated = prev.map((t) => {
+        const isMatch =
+          (targetTagihanId && t.tagihanId && t.tagihanId === targetTagihanId) ||
+          (targetId && t.id && t.id === targetId && t.periodeBulan === item.periodeBulan && t.periodeTahun === item.periodeTahun) ||
+          (targetSmb && t.noSmb && t.noSmb === targetSmb && t.periodeBulan === item.periodeBulan && t.periodeTahun === item.periodeTahun);
+
+        if (isMatch) {
+          return {
+            ...t,
+            isSelesai: nextStatus,
+          };
+        }
+        return t;
+      });
+      saveTagihanToInternalStorage(updated);
+      return updated;
+    });
+
+    if (Platform.OS === 'android') {
+      ToastAndroid.show(
+        nextStatus
+          ? `Status No. SMB ${item.noSmb || item.nama || ''} Selesai (hilang dari peta rute)`
+          : `Status No. SMB ${item.noSmb || item.nama || ''} Batal Selesai (tampil kembali di peta rute)`,
+        ToastAndroid.SHORT
       );
     }
   };
@@ -1093,6 +1296,23 @@ function MainApp() {
       return updated;
     });
     setSelectedPelangganIds((prev) => prev.filter((itemId) => itemId !== id));
+  };
+
+  // State & Handler untuk meng-edit titik koordinat pelanggan via interactive Maps Rumah
+  const [editingPelangganForMap, setEditingPelangganForMap] = useState(null);
+
+  const handleOpenEditCustomerMap = (customer) => {
+    if (!customer) return;
+    setEditingPelangganForMap(customer);
+    const parsed = parseCustomerCoords(customer);
+    if (parsed) {
+      setTempPickerCoords(parsed);
+    } else if (userLocation) {
+      setTempPickerCoords(userLocation);
+    } else {
+      setTempPickerCoords({ lat: -7.1539, lng: 112.6561 });
+    }
+    setCurrentScreen('pilih_titik_alamat');
   };
 
   const [isImportingExcel, setIsImportingExcel] = useState(false);
@@ -1277,10 +1497,11 @@ function MainApp() {
         seenSmbInFile.add(smbKey);
         if (smbDigits) seenSmbInFile.add(smbDigits);
 
-        // Format titik koordinat sesuai instruksi: digabung dengan format (latitude, longtitude)
-        const finalLat = latNum !== null ? latNum : (userLocation ? userLocation.lat : -7.25751);
-        const finalLng = lngNum !== null ? lngNum : (userLocation ? userLocation.lng : 112.75214);
-        const koordinatFormatted = `(${finalLat}, ${finalLng})`;
+        // Format titik koordinat sesuai instruksi: jika tidak ada latitude & longtitude di salah satu pelanggan, biarkan kosong (untuk nanti diinput manual)
+        const hasCoords = latNum !== null && lngNum !== null;
+        const finalLat = hasCoords ? latNum : null;
+        const finalLng = hasCoords ? lngNum : null;
+        const koordinatFormatted = hasCoords ? `(${finalLat}, ${finalLng})` : '';
 
         // Nama pelanggan otomatis "Super Pelanggan" jika tidak ada di Excel
         const finalNama = (rawNama && String(rawNama).trim()) ? String(rawNama).trim() : 'Super Pelanggan';
@@ -1316,7 +1537,7 @@ function MainApp() {
           return;
         }
         throw new Error(
-          'Tidak ada data pelanggan yang cocok. Pastikan file Excel memiliki baris kategori: No. SMB, Alamat, Latitude, dan Longitude (Nama Pelanggan opsional).'
+          'Tidak ada data pelanggan yang cocok. Pastikan file Excel memiliki baris kategori: No. SMB dan Alamat (Nama Pelanggan dan Koordinat opsional).'
         );
       }
 
@@ -1436,17 +1657,10 @@ function MainApp() {
       // Mode 'view_tagihan': Set periode terpilih dan buka layar Daftar Tagihan
       setSelectedMonth(month);
       setSelectedYear(modalYear);
+      setSelectedTagihanIds([]);
       setPeriodModalVisible(false);
       setCurrentScreen('daftar_tagihan');
     }
-  };
-
-  const handleHapusTagihan = (tagihanId) => {
-    setDaftarTagihanPelanggan((prev) => {
-      const updated = prev.filter((item) => (item.tagihanId || item.id) !== tagihanId);
-      saveTagihanToInternalStorage(updated);
-      return updated;
-    });
   };
 
 
@@ -1669,6 +1883,51 @@ function MainApp() {
     );
   };
 
+  // Render Modal Pop-up "Sistem Belum Berfungsi" (Pelanggan TS & Pembukaan TS)
+  const renderTSNoticeModal = () => {
+    return (
+      <Modal
+        animationType="fade"
+        transparent={true}
+        visible={tsNoticeModalVisible}
+        onRequestClose={() => setTsNoticeModalVisible(false)}
+      >
+        <Pressable
+          style={styles.tsModalOverlay}
+          onPress={() => setTsNoticeModalVisible(false)}
+        >
+          <Pressable
+            style={styles.tsModalCard}
+            onPress={(e) => e.stopPropagation()}
+          >
+            {/* Warning / Notice Icon */}
+            <View style={styles.tsModalIconCircle}>
+              <Ionicons name="alert-circle-outline" size={46} color="#D97706" />
+            </View>
+
+            {/* Title & Message */}
+            <Text style={styles.tsModalTitle}>Pemberitahuan</Text>
+            <Text
+              style={styles.tsModalMessage}
+              accessibilityLabel="Sistem belum berfungsitunggu update selanjutnya"
+            >
+              Sistem belum berfungsi, tunggu update selanjutnya
+            </Text>
+
+            {/* Button Mengerti */}
+            <TouchableOpacity
+              style={styles.tsModalBtn}
+              onPress={() => setTsNoticeModalVisible(false)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.tsModalBtnText}>Mengerti</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    );
+  };
+
   // Render Item FlatList untuk performa ultra tinggi (Virtualisasi data ribuan pelanggan)
   // Dideklarasikan di sini agar seluruh hook selalu terpanggil secara berurutan sebelum conditional return layar apapun
   const renderPelangganCard = useCallback(
@@ -1729,14 +1988,6 @@ function MainApp() {
               >
                 <Ionicons name="add" size={16} color="#07326E" />
               </TouchableOpacity>
-
-              <TouchableOpacity
-                onPress={() => handleDeletePelanggan(item.id)}
-                activeOpacity={0.7}
-                style={styles.pelangganDeleteBtn}
-              >
-                <Ionicons name="trash-outline" size={15} color="#EF4444" />
-              </TouchableOpacity>
             </View>
           </View>
 
@@ -1767,23 +2018,38 @@ function MainApp() {
                   </View>
                   <View style={styles.pelangganCoordTextContainer}>
                     <Text style={styles.pelangganCoordTitle}>Koordinat Terpilih</Text>
-                    <Text style={styles.pelangganCoordValue}>{item.koordinat || '-'}</Text>
+                    <Text style={styles.pelangganCoordValue} numberOfLines={1}>{item.koordinat || 'Belum diatur (input manual)'}</Text>
                   </View>
-                  <TouchableOpacity
-                    style={styles.pelangganBukaPetaBtn}
-                    activeOpacity={0.8}
-                    onPress={() => {
-                      const clean = String(item.koordinat || '').replace(/[()]/g, '').trim();
-                      if (Platform.OS === 'web') {
-                        window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`, '_blank');
-                      } else {
-                        Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`);
-                      }
-                    }}
-                  >
-                    <Text style={styles.pelangganBukaPetaBtnText}>Buka Maps</Text>
-                    <Ionicons name="open-outline" size={12} color="#07326E" style={{ marginLeft: 3 }} />
-                  </TouchableOpacity>
+
+                  {/* Container Tombol: Buka Maps & Edit Maps saling menyesuaikan */}
+                  <View style={styles.pelangganCoordButtonsContainer}>
+                    <TouchableOpacity
+                      style={styles.pelangganEditMapsBtn}
+                      activeOpacity={0.8}
+                      onPress={() => handleOpenEditCustomerMap(item)}
+                    >
+                      <Ionicons name="create-outline" size={12} color="#047857" style={{ marginRight: 3 }} />
+                      <Text style={styles.pelangganEditMapsBtnText}>Edit Maps</Text>
+                    </TouchableOpacity>
+
+                    {item.koordinat ? (
+                      <TouchableOpacity
+                        style={styles.pelangganBukaPetaBtn}
+                        activeOpacity={0.8}
+                        onPress={() => {
+                          const clean = String(item.koordinat || '').replace(/[()]/g, '').trim();
+                          if (Platform.OS === 'web') {
+                            window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`, '_blank');
+                          } else {
+                            Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`);
+                          }
+                        }}
+                      >
+                        <Text style={styles.pelangganBukaPetaBtnText}>Buka Maps</Text>
+                        <Ionicons name="open-outline" size={11} color="#07326E" style={{ marginLeft: 3 }} />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
                 </View>
               </View>
             </View>
@@ -1791,12 +2057,21 @@ function MainApp() {
         </View>
       );
     },
-    [selectedPelangganSet, expandedPelangganId, selectedPelangganIds.length, toggleSelectPelanggan, handleOpenTransferModal, handleDeletePelanggan]
+    [
+      selectedPelangganSet,
+      expandedPelangganId,
+      selectedPelangganIds.length,
+      toggleSelectPelanggan,
+      handleOpenTransferModal,
+      handleDeletePelanggan,
+      handleOpenEditCustomerMap,
+    ]
   );
 
   useEffect(() => {
     let isMounted = true;
     let subscription = null;
+    let headingSubscription = null;
     let browserWatchId = null;
 
     async function startRealtimeTracking() {
@@ -1809,7 +2084,11 @@ function MainApp() {
                 lat: pos.coords.latitude,
                 lng: pos.coords.longitude,
                 accuracy: pos.coords.accuracy,
+                heading: (typeof pos.coords.heading === 'number' && pos.coords.heading >= 0) ? pos.coords.heading : null,
               });
+              if (typeof pos.coords.heading === 'number' && pos.coords.heading >= 0) {
+                setUserHeading(pos.coords.heading);
+              }
             }
           },
           (err) => console.warn('Geolocation initial error:', err),
@@ -1823,12 +2102,32 @@ function MainApp() {
                 lat: pos.coords.latitude,
                 lng: pos.coords.longitude,
                 accuracy: pos.coords.accuracy,
+                heading: (typeof pos.coords.heading === 'number' && pos.coords.heading >= 0) ? pos.coords.heading : null,
               });
+              if (typeof pos.coords.heading === 'number' && pos.coords.heading >= 0) {
+                setUserHeading(pos.coords.heading);
+              }
             }
           },
           (err) => console.warn('Geolocation watch error:', err),
           { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
         );
+
+        if (typeof window !== 'undefined' && window.addEventListener) {
+          const handleOrientation = (e) => {
+            if (!isMounted) return;
+            let heading = null;
+            if (typeof e.webkitCompassHeading === 'number') {
+              heading = e.webkitCompassHeading;
+            } else if (typeof e.alpha === 'number') {
+              heading = (360 - e.alpha) % 360;
+            }
+            if (heading !== null && !isNaN(heading)) {
+              setUserHeading(heading);
+            }
+          };
+          window.addEventListener('deviceorientation', handleOrientation);
+        }
         return;
       }
 
@@ -1844,7 +2143,11 @@ function MainApp() {
               lat: initialLoc.coords.latitude,
               lng: initialLoc.coords.longitude,
               accuracy: initialLoc.coords.accuracy,
+              heading: (typeof initialLoc.coords.heading === 'number' && initialLoc.coords.heading >= 0) ? initialLoc.coords.heading : null,
             });
+            if (typeof initialLoc.coords.heading === 'number' && initialLoc.coords.heading >= 0) {
+              setUserHeading(initialLoc.coords.heading);
+            }
           }
 
           subscription = await Location.watchPositionAsync(
@@ -1859,10 +2162,30 @@ function MainApp() {
                   lat: loc.coords.latitude,
                   lng: loc.coords.longitude,
                   accuracy: loc.coords.accuracy,
+                  heading: (typeof loc.coords.heading === 'number' && loc.coords.heading >= 0) ? loc.coords.heading : null,
                 });
+                if (typeof loc.coords.heading === 'number' && loc.coords.heading >= 0) {
+                  setUserHeading(loc.coords.heading);
+                }
               }
             }
           );
+
+          // Track compass heading jika sensor magnetometer tersedia
+          try {
+            if (typeof Location.watchHeadingAsync === 'function') {
+              headingSubscription = await Location.watchHeadingAsync((h) => {
+                if (!isMounted || !h) return;
+                if (typeof h.trueHeading === 'number' && h.trueHeading >= 0) {
+                  setUserHeading(h.trueHeading);
+                } else if (typeof h.magHeading === 'number' && h.magHeading >= 0) {
+                  setUserHeading(h.magHeading);
+                }
+              });
+            }
+          } catch (hErr) {
+            console.log('Compass heading unavailable, using GPS heading:', hErr);
+          }
         }
       } catch (e) {
         console.warn('Location tracking error:', e);
@@ -1875,6 +2198,9 @@ function MainApp() {
       isMounted = false;
       if (subscription && subscription.remove) {
         subscription.remove();
+      }
+      if (headingSubscription && headingSubscription.remove) {
+        headingSubscription.remove();
       }
       if (browserWatchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
         navigator.geolocation.clearWatch(browserWatchId);
@@ -2016,15 +2342,36 @@ function MainApp() {
         return distA - distB; // Urutkan dari yang terdekat (paling atas) ke terjauh
       });
 
+    // Filter pencarian tagihan pelanggan hanya berdasarkan Nomor SMB
+    const filteredTagihanPeriodeIni = tagihanSearchQuery.trim()
+      ? tagihanPeriodeIni.filter((t) => {
+        if (!t.noSmb) return false;
+        const q = tagihanSearchQuery.toLowerCase().trim();
+        const queryDigits = q.replace(/\D/g, '');
+        const noSmb = String(t.noSmb).toLowerCase().trim();
+        const noSmbDigits = noSmb.replace(/\D/g, '');
+        return noSmb.includes(q) || (queryDigits.length > 0 && noSmbDigits.includes(queryDigits));
+      })
+      : tagihanPeriodeIni;
+
+    // Status apakah seluruh data tagihan yang tampil telah diceklist (O(1) instant)
+    const isAllTagihanSelected =
+      filteredTagihanPeriodeIni.length > 0 &&
+      selectedTagihanIds.length >= filteredTagihanPeriodeIni.length &&
+      filteredTagihanPeriodeIni.every((t) => selectedTagihanSet.has(t.tagihanId || t.id));
+
     return (
-      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right', 'bottom']}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
         <StatusBar style="dark" backgroundColor="#FFFFFF" />
 
         {/* Header Navigation */}
         <View style={styles.headerBar}>
           <TouchableOpacity
             style={styles.backBtn}
-            onPress={() => setCurrentScreen('home')}
+            onPress={() => {
+              setSelectedTagihanIds([]);
+              setCurrentScreen('home');
+            }}
             activeOpacity={0.7}
           >
             <Ionicons name="arrow-back" size={22} color="#0F172A" />
@@ -2035,11 +2382,8 @@ function MainApp() {
           </View>
         </View>
 
-        <ScrollView
-          style={styles.container}
-          contentContainerStyle={styles.formScrollContent}
-          showsVerticalScrollIndicator={false}
-        >
+        {/* Header Tetap (Stay): Periode, Judul, Search Bar, & Baris Ceklist */}
+        <View style={styles.tagihanFixedHeaderContainer}>
           {/* Periode Penagihan Aktif (Klik untuk ubah periode via Modal) */}
           <TouchableOpacity
             style={styles.activePeriodCard}
@@ -2051,7 +2395,7 @@ function MainApp() {
             }}
           >
             <View style={styles.activePeriodIconBox}>
-              <Ionicons name="calendar" size={22} color="#07326E" />
+              <Ionicons name="calendar" size={19} color="#07326E" />
             </View>
             <View style={styles.activePeriodInfo}>
               <Text style={styles.activePeriodLabel}>PERIODE PENAGIHAN AKTIF</Text>
@@ -2065,179 +2409,309 @@ function MainApp() {
             </View>
           </TouchableOpacity>
 
-          {/* DAFTAR TAGIHAN PELANGGAN */}
-          <View style={styles.tagihanPelangganSection}>
-            <View style={styles.tagihanPelangganHeaderRow}>
-              <View>
-                <Text style={styles.tagihanPelangganSectionTitle}>
-                  DAFTAR TAGIHAN PELANGGAN
-                </Text>
-                <Text style={styles.tagihanPelangganSubtitle}>
-                  Periode: {MONTH_NAMES[selectedMonth]} {selectedYear} ({tagihanPeriodeIni.length} Pelanggan)
-                </Text>
-              </View>
-              <View style={styles.tagihanPelangganBadge}>
-                <Text style={styles.tagihanPelangganBadgeText}>
-                  {tagihanPeriodeIni.length} Tagihan
-                </Text>
+          {/* Header Row: DAFTAR TAGIHAN PELANGGAN */}
+          <View style={styles.tagihanPelangganHeaderRow}>
+            <View>
+              <Text style={styles.tagihanPelangganSectionTitle}>
+                DAFTAR TAGIHAN PELANGGAN
+              </Text>
+              <Text style={styles.tagihanPelangganSubtitle}>
+                {tagihanSearchQuery.trim()
+                  ? `Menampilkan ${filteredTagihanPeriodeIni.length} dari ${tagihanPeriodeIni.length} pelanggan`
+                  : `Periode: ${MONTH_NAMES[selectedMonth]} ${selectedYear} (${tagihanPeriodeIni.length} Pelanggan)`}
+              </Text>
+            </View>
+            <View style={styles.tagihanPelangganBadge}>
+              <Text style={styles.tagihanPelangganBadgeText}>
+                {filteredTagihanPeriodeIni.length} Tagihan
+              </Text>
+            </View>
+          </View>
+
+          {/* Search Input Bar (Hanya Nomor SMB) */}
+          <View style={[styles.pelangganSearchBox, { marginBottom: 6 }]}>
+            <Ionicons name="search" size={20} color="#60A5FA" style={styles.pelangganSearchIcon} />
+            <TextInput
+              style={styles.pelangganSearchInput}
+              placeholder="Cari No. SMB (xx-xxxxx)..."
+              placeholderTextColor="#94A3B8"
+              value={tagihanSearchQuery}
+              onChangeText={handleSearchTagihanSmbChange}
+              maxLength={8}
+              keyboardType="numeric"
+            />
+            {tagihanSearchQuery.length > 0 && (
+              <TouchableOpacity onPress={() => setTagihanSearchQuery('')} activeOpacity={0.7}>
+                <Ionicons name="close-circle" size={18} color="#94A3B8" />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Counter Text & Tombol Ceklist Semua */}
+          {tagihanPeriodeIni.length > 0 && (
+            <View style={[styles.pelangganCountRow, { marginTop: 0, marginBottom: 7 }]}>
+              <Text style={styles.pelangganCountText}>
+                Menampilkan <Text style={styles.pelangganCountBold}>{filteredTagihanPeriodeIni.length}</Text> dari <Text style={styles.pelangganCountBold}>{tagihanPeriodeIni.length}</Text> total tagihan
+              </Text>
+
+              {filteredTagihanPeriodeIni.length > 0 && (
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => handleSelectAllTagihan(filteredTagihanPeriodeIni)}
+                  style={[
+                    styles.pelangganSelectAllBtn,
+                    isAllTagihanSelected && styles.pelangganSelectAllBtnActive,
+                  ]}
+                >
+                  <Ionicons
+                    name={isAllTagihanSelected ? 'checkmark-done-circle' : 'checkmark-circle-outline'}
+                    size={15}
+                    color={isAllTagihanSelected ? '#10B981' : '#07326E'}
+                    style={{ marginRight: 4 }}
+                  />
+                  <Text
+                    style={[
+                      styles.pelangganSelectAllText,
+                      isAllTagihanSelected && styles.pelangganSelectAllTextActive,
+                    ]}
+                  >
+                    {isAllTagihanSelected ? 'Batal Ceklist' : 'Ceklist Semua'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+        </View>
+
+        {/* Area Scroll: Hanya kartu pelanggan yang merespon scroll */}
+        <ScrollView
+          style={styles.tagihanScrollContainer}
+          contentContainerStyle={[
+            styles.tagihanScrollContent,
+            {
+              paddingBottom: selectedTagihanIds.length > 0
+                ? 24
+                : (Platform.OS === 'android' ? (insets.bottom > 0 ? insets.bottom + 36 : 76) : Math.max(insets.bottom, 16) + 24),
+            },
+          ]}
+          showsVerticalScrollIndicator={false}
+        >
+
+          {tagihanPeriodeIni.length === 0 ? (
+            <View style={styles.tagihanEmptyBox}>
+              <Ionicons name="receipt-outline" size={38} color="#94A3B8" />
+              <Text style={styles.tagihanEmptyTitle}>Belum Ada Tagihan di Periode Ini</Text>
+              <Text style={styles.tagihanEmptyDesc}>
+                Belum ada data pelanggan yang ditransfer ke periode {MONTH_NAMES[selectedMonth]} {selectedYear}. Tekan icon "+" pada Data Pelanggan untuk mentransfer pelanggan ke periode ini.
+              </Text>
+              <View style={styles.tagihanEmptyActions}>
+                <TouchableOpacity
+                  style={styles.bukaDataPelangganBtn}
+                  onPress={() => setCurrentScreen('data_pelanggan')}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="people-outline" size={15} color="#07326E" style={{ marginRight: 6 }} />
+                  <Text style={styles.bukaDataPelangganBtnText}>Buka Data Pelanggan</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.bukaDataPelangganBtn, { backgroundColor: '#EAF1FB', borderColor: '#BFDBFE' }]}
+                  onPress={() => {
+                    setModalYear(selectedYear);
+                    setPeriodModalMode('view_tagihan');
+                    setPeriodModalVisible(true);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="calendar-outline" size={15} color="#07326E" style={{ marginRight: 6 }} />
+                  <Text style={styles.bukaDataPelangganBtnText}>Pilih Periode Lain</Text>
+                </TouchableOpacity>
               </View>
             </View>
-
-            {tagihanPeriodeIni.length === 0 ? (
-              <View style={styles.tagihanEmptyBox}>
-                <Ionicons name="receipt-outline" size={38} color="#94A3B8" />
-                <Text style={styles.tagihanEmptyTitle}>Belum Ada Tagihan di Periode Ini</Text>
-                <Text style={styles.tagihanEmptyDesc}>
-                  Belum ada data pelanggan yang ditransfer ke periode {MONTH_NAMES[selectedMonth]} {selectedYear}. Tekan icon "+" pada Data Pelanggan untuk mentransfer pelanggan ke periode ini.
-                </Text>
-                <View style={styles.tagihanEmptyActions}>
-                  <TouchableOpacity
-                    style={styles.bukaDataPelangganBtn}
-                    onPress={() => setCurrentScreen('data_pelanggan')}
-                    activeOpacity={0.8}
+          ) : filteredTagihanPeriodeIni.length === 0 ? (
+            <View style={styles.tagihanEmptyBox}>
+              <Ionicons name="search-outline" size={38} color="#94A3B8" />
+              <Text style={styles.tagihanEmptyTitle}>Tagihan Tidak Ditemukan</Text>
+              <Text style={styles.tagihanEmptyDesc}>
+                Tidak ada tagihan yang cocok dengan Nomor SMB "{tagihanSearchQuery}".
+              </Text>
+              <TouchableOpacity
+                style={[styles.bukaDataPelangganBtn, { marginTop: 14 }]}
+                onPress={() => setTagihanSearchQuery('')}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="close-circle-outline" size={15} color="#07326E" style={{ marginRight: 6 }} />
+                <Text style={styles.bukaDataPelangganBtnText}>Reset Pencarian</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.tagihanListWrap}>
+              {filteredTagihanPeriodeIni.map((tagihan, index) => {
+                const itemKey = tagihan.tagihanId || tagihan.id || `tgh-${index}`;
+                const isExpanded = expandedTagihanId === itemKey;
+                const isItemSelected = selectedTagihanSet.has(itemKey);
+                return (
+                  <View
+                    key={itemKey}
+                    style={[
+                      styles.pelangganItemCard,
+                      isItemSelected && styles.pelangganItemCardSelected,
+                      tagihan.isSelesai && styles.pelangganItemCardSelesai,
+                    ]}
                   >
-                    <Ionicons name="people-outline" size={15} color="#07326E" style={{ marginRight: 6 }} />
-                    <Text style={styles.bukaDataPelangganBtnText}>Buka Data Pelanggan</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.bukaDataPelangganBtn, { backgroundColor: '#EAF1FB', borderColor: '#BFDBFE' }]}
-                    onPress={() => {
-                      setModalYear(selectedYear);
-                      setPeriodModalMode('view_tagihan');
-                      setPeriodModalVisible(true);
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <Ionicons name="calendar-outline" size={15} color="#07326E" style={{ marginRight: 6 }} />
-                    <Text style={styles.bukaDataPelangganBtnText}>Pilih Periode Lain</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ) : (
-              <View style={styles.tagihanListWrap}>
-                {tagihanPeriodeIni.map((tagihan, index) => {
-                  const itemKey = tagihan.tagihanId || tagihan.id || `tgh-${index}`;
-                  const isExpanded = expandedTagihanId === itemKey;
-                  return (
-                    <View key={itemKey} style={styles.pelangganItemCard}>
-                      {/* Baris 1: No. SMB & Nama Pelanggan di Baris Satu, Estimasi Jarak & Hapus di Kanan (Tanpa Chevron) */}
-                      <View style={styles.pelangganItemRow1}>
-                        <View style={styles.pelangganItemRow1Left}>
-                          <View style={styles.pelangganNoSmbBadge}>
-                            <Text style={styles.pelangganNoSmbText}>{tagihan.noSmb || '-'}</Text>
-                          </View>
+                    {/* Baris 1: No. SMB & Nama Pelanggan di Baris Satu, Estimasi Jarak di Kanan (Tanpa Chevron & Tanpa Icon Sampah) */}
+                    <View style={styles.pelangganItemRow1}>
+                      <View style={styles.pelangganItemRow1Left}>
+                        {/* Tombol Ceklist per Tagihan Pelanggan */}
+                        <TouchableOpacity
+                          activeOpacity={0.7}
+                          onPress={() => toggleSelectTagihan(itemKey)}
+                          style={styles.pelangganCheckboxBtn}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Ionicons
+                            name={isItemSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                            size={21}
+                            color={isItemSelected ? '#10B981' : '#94A3B8'}
+                          />
+                        </TouchableOpacity>
 
-                          <TouchableOpacity
-                            activeOpacity={0.7}
-                            onPress={() => setExpandedTagihanId(isExpanded ? null : itemKey)}
-                            style={styles.pelangganNameInlineWrapper}
-                          >
-                            <Text style={styles.pelangganItemNameInline} numberOfLines={1}>
-                              {tagihan.nama || 'Super Pelanggan'}
-                            </Text>
-                          </TouchableOpacity>
+                        <View style={styles.pelangganNoSmbBadge}>
+                          <Text style={styles.pelangganNoSmbText}>{tagihan.noSmb || '-'}</Text>
                         </View>
 
-                        <View style={styles.pelangganTopActionRow}>
-                          {tagihan._distanceFormatted ? (
-                            <View style={styles.tagihanJarakBadge}>
-                              <Ionicons name="navigate" size={10} color="#047857" style={{ marginRight: 3 }} />
-                              <Text style={styles.tagihanJarakText}>{tagihan._distanceFormatted}</Text>
-                            </View>
-                          ) : null}
-
-                          {/* Icon Chevron dihapus untuk menghemat ruang */}
-
-                          <TouchableOpacity
-                            onPress={() => handleHapusTagihan(itemKey)}
-                            activeOpacity={0.7}
-                            style={styles.pelangganDeleteBtn}
-                          >
-                            <Ionicons name="trash-outline" size={15} color="#EF4444" />
-                          </TouchableOpacity>
-                        </View>
+                        <TouchableOpacity
+                          activeOpacity={0.7}
+                          onPress={() => {
+                            if (selectedTagihanIds.length > 0) {
+                              toggleSelectTagihan(itemKey);
+                            } else {
+                              setExpandedTagihanId(isExpanded ? null : itemKey);
+                            }
+                          }}
+                          style={styles.pelangganNameInlineWrapper}
+                        >
+                          <Text style={styles.pelangganItemNameInline} numberOfLines={1}>
+                            {tagihan.nama || 'Super Pelanggan'}
+                          </Text>
+                        </TouchableOpacity>
                       </View>
 
-                      {/* Baris 2: Alamat Pelanggan */}
-                      <TouchableOpacity
-                        activeOpacity={0.85}
-                        onPress={() => setExpandedTagihanId(isExpanded ? null : itemKey)}
-                        style={styles.pelangganAddressRow}
-                      >
-                        <Text style={styles.pelangganItemAddressText} numberOfLines={2}>
-                          {tagihan.alamat || '-'}
-                        </Text>
-                      </TouchableOpacity>
+                      <View style={styles.pelangganTopActionRow}>
+                        {/* Tombol Icon Centang Status Selesai / Batal Selesai */}
+                        <TouchableOpacity
+                          activeOpacity={0.7}
+                          onPress={() => handleToggleStatusSelesaiTagihan(tagihan)}
+                          style={[
+                            styles.tagihanSelesaiBtn,
+                            tagihan.isSelesai && styles.tagihanSelesaiBtnActive,
+                          ]}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Ionicons
+                            name={tagihan.isSelesai ? 'checkmark' : 'checkmark-outline'}
+                            size={11.5}
+                            color={tagihan.isSelesai ? '#FFFFFF' : '#64748B'}
+                          />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
 
-                      {/* Detail & Form Foto Persil: Muncul jika Pelanggan diklik */}
-                      {isExpanded ? (
-                        <View style={styles.pelangganDetailContainer}>
-                          {/* Form Foto Persil Sesuai Tampilan Desain */}
-                          <View style={styles.tagihanFotoPersilSection}>
-                            <Text style={styles.tagihanFotoPersilTitle}>Foto Persil</Text>
-                            <View style={styles.tagihanFotoPersilBtnRow}>
-                              <TouchableOpacity
-                                style={styles.tagihanFotoPersilBtn}
-                                activeOpacity={0.8}
-                                onPress={() => handleBukaKameraTagihan(itemKey)}
-                              >
-                                <Ionicons name="camera-outline" size={16} color="#07326E" style={{ marginRight: 6 }} />
-                                <Text style={styles.tagihanFotoPersilBtnText}>Buka Kamera</Text>
-                              </TouchableOpacity>
+                    {/* Baris 2: Alamat Pelanggan */}
+                    <TouchableOpacity
+                      activeOpacity={selectedTagihanIds.length > 0 ? 0.7 : 0.85}
+                      onPress={() => {
+                        if (selectedTagihanIds.length > 0) {
+                          toggleSelectTagihan(itemKey);
+                        } else {
+                          setExpandedTagihanId(isExpanded ? null : itemKey);
+                        }
+                      }}
+                      style={styles.pelangganAddressRow}
+                    >
+                      <Text style={styles.pelangganItemAddressText} numberOfLines={2}>
+                        {tagihan.alamat || '-'}
+                      </Text>
+                    </TouchableOpacity>
 
-                              <TouchableOpacity
-                                style={styles.tagihanFotoPersilBtn}
-                                activeOpacity={0.8}
-                                onPress={() => handleBukaGaleriTagihan(itemKey)}
-                              >
-                                <Ionicons name="images-outline" size={16} color="#07326E" style={{ marginRight: 6 }} />
-                                <Text style={styles.tagihanFotoPersilBtnText}>Dari Galeri</Text>
-                              </TouchableOpacity>
-                            </View>
+                    {/* Detail & Form Foto Persil: Muncul jika Pelanggan diklik */}
+                    {isExpanded ? (
+                      <View style={styles.pelangganDetailContainer}>
+                        {/* Form Foto Persil Sesuai Tampilan Desain */}
+                        <View style={styles.tagihanFotoPersilSection}>
+                          <Text style={styles.tagihanFotoPersilTitle}>Foto Persil</Text>
+                          <View style={styles.tagihanFotoPersilBtnRow}>
+                            <TouchableOpacity
+                              style={styles.tagihanFotoPersilBtn}
+                              activeOpacity={0.8}
+                              onPress={() => handleBukaKameraTagihan(itemKey)}
+                            >
+                              <Ionicons name="camera-outline" size={16} color="#07326E" style={{ marginRight: 6 }} />
+                              <Text style={styles.tagihanFotoPersilBtnText}>Buka Kamera</Text>
+                            </TouchableOpacity>
 
-                            {/* Foto Persil yang sudah diambil: Hanya tampilkan foto saja tanpa keterangan apapun */}
-                            {tagihan.fotoPersil ? (
-                              <View style={styles.fotoPersilPreviewWrapper}>
-                                <TouchableOpacity
-                                  activeOpacity={0.88}
-                                  onPress={() =>
-                                    setSelectedPhotoFull({
-                                      uri: tagihan.fotoPersil,
-                                      title: `Foto Persil - ${tagihan.nama || ''} (${tagihan.noSmb || ''})`,
-                                    })
-                                  }
-                                  style={styles.fotoPersilImageContainer}
-                                >
-                                  <Image
-                                    source={{ uri: tagihan.fotoPersil }}
-                                    style={styles.fotoPersilCleanImage}
-                                    resizeMode="cover"
-                                  />
-                                </TouchableOpacity>
-
-                                {/* Tombol hapus foto floating di sudut foto tanpa teks/keterangan */}
-                                <TouchableOpacity
-                                  onPress={() => handleHapusFotoPersilTagihan(itemKey)}
-                                  activeOpacity={0.7}
-                                  style={styles.fotoPersilHapusFloatingBtn}
-                                >
-                                  <Ionicons name="trash-outline" size={15} color="#FFFFFF" />
-                                </TouchableOpacity>
-                              </View>
-                            ) : null}
+                            <TouchableOpacity
+                              style={styles.tagihanFotoPersilBtn}
+                              activeOpacity={0.8}
+                              onPress={() => handleBukaGaleriTagihan(itemKey)}
+                            >
+                              <Ionicons name="images-outline" size={16} color="#07326E" style={{ marginRight: 6 }} />
+                              <Text style={styles.tagihanFotoPersilBtnText}>Dari Galeri</Text>
+                            </TouchableOpacity>
                           </View>
 
-                          {/* Titik Koordinat jika ada */}
-                          {tagihan.koordinat ? (
-                            <View style={[styles.pelangganDetailSection, { marginTop: 10 }]}>
-                              <View style={styles.pelangganCoordBox}>
-                                <View style={styles.pelangganCoordIconCircle}>
-                                  <Ionicons name="location" size={18} color="#EF4444" />
-                                </View>
-                                <View style={styles.pelangganCoordTextContainer}>
-                                  <Text style={styles.pelangganCoordTitle}>Koordinat Terpilih</Text>
-                                  <Text style={styles.pelangganCoordValue}>{String(tagihan.koordinat)}</Text>
-                                </View>
+                          {/* Foto Persil yang sudah diambil: Hanya tampilkan foto saja tanpa keterangan apapun */}
+                          {tagihan.fotoPersil ? (
+                            <View style={styles.fotoPersilPreviewWrapper}>
+                              <TouchableOpacity
+                                activeOpacity={0.88}
+                                onPress={() =>
+                                  setSelectedPhotoFull({
+                                    uri: tagihan.fotoPersil,
+                                    title: `Foto Persil - ${tagihan.nama || ''} (${tagihan.noSmb || ''})`,
+                                  })
+                                }
+                                style={styles.fotoPersilImageContainer}
+                              >
+                                <Image
+                                  source={{ uri: tagihan.fotoPersil }}
+                                  style={styles.fotoPersilCleanImage}
+                                  resizeMode="cover"
+                                />
+                              </TouchableOpacity>
+
+                              {/* Tombol hapus foto floating di sudut foto tanpa teks/keterangan */}
+                              <TouchableOpacity
+                                onPress={() => handleHapusFotoPersilTagihan(itemKey)}
+                                activeOpacity={0.7}
+                                style={styles.fotoPersilHapusFloatingBtn}
+                              >
+                                <Ionicons name="trash-outline" size={15} color="#FFFFFF" />
+                              </TouchableOpacity>
+                            </View>
+                          ) : null}
+                        </View>
+
+                        {/* Titik Koordinat jika ada */}
+                        {tagihan.koordinat ? (
+                          <View style={[styles.pelangganDetailSection, { marginTop: 10 }]}>
+                            <View style={styles.pelangganCoordBox}>
+                              <View style={styles.pelangganCoordIconCircle}>
+                                <Ionicons name="location" size={18} color="#EF4444" />
+                              </View>
+                              <View style={styles.pelangganCoordTextContainer}>
+                                <Text style={styles.pelangganCoordTitle}>Koordinat Terpilih</Text>
+                                <Text style={styles.pelangganCoordValue} numberOfLines={1}>{String(tagihan.koordinat)}</Text>
+                              </View>
+                              <View style={styles.pelangganCoordButtonsContainer}>
+                                <TouchableOpacity
+                                  style={styles.pelangganEditMapsBtn}
+                                  activeOpacity={0.8}
+                                  onPress={() => handleOpenEditCustomerMap(tagihan)}
+                                >
+                                  <Ionicons name="create-outline" size={12} color="#047857" style={{ marginRight: 3 }} />
+                                  <Text style={styles.pelangganEditMapsBtnText}>Edit Maps</Text>
+                                </TouchableOpacity>
+
                                 <TouchableOpacity
                                   style={styles.pelangganBukaPetaBtn}
                                   activeOpacity={0.8}
@@ -2258,22 +2732,22 @@ function MainApp() {
                                   <Text style={styles.pelangganBukaPetaBtnText}>Buka Maps</Text>
                                   <Ionicons
                                     name="open-outline"
-                                    size={12}
+                                    size={11}
                                     color="#07326E"
                                     style={{ marginLeft: 3 }}
                                   />
                                 </TouchableOpacity>
                               </View>
                             </View>
-                          ) : null}
-                        </View>
-                      ) : null}
-                    </View>
-                  );
-                })}
-              </View>
-            )}
-          </View>
+                          </View>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          )}
 
           {/* Notice Box */}
           <View style={styles.noticeBox}>
@@ -2286,13 +2760,59 @@ function MainApp() {
           {/* Button Kembali */}
           <TouchableOpacity
             style={[styles.secondaryBtn, { marginTop: 14 }]}
-            onPress={() => setCurrentScreen('home')}
+            onPress={() => {
+              setSelectedTagihanIds([]);
+              setCurrentScreen('home');
+            }}
             activeOpacity={0.8}
           >
             <Ionicons name="arrow-back" size={18} color="#475569" style={{ marginRight: 8 }} />
             <Text style={styles.secondaryBtnText}>Kembali ke Menu Utama</Text>
           </TouchableOpacity>
         </ScrollView>
+
+        {/* Bar Tindakan Kolektif Tagihan (Muncul jika ada data yang diceklist) */}
+        {selectedTagihanIds.length > 0 && (
+          <View
+            style={[
+              styles.tagihanBottomBarContainer,
+              {
+                paddingBottom: Platform.OS === 'android'
+                  ? (insets.bottom > 0 ? insets.bottom + 12 : 48)
+                  : Math.max(insets.bottom, 12),
+              },
+            ]}
+          >
+            <View style={styles.tagihanFloatingBatchBar}>
+              <View style={styles.pelangganBatchLeft}>
+                <View style={styles.pelangganBatchBadge}>
+                  <Ionicons name="checkmark-circle" size={14} color="#10B981" style={{ marginRight: 4 }} />
+                  <Text style={styles.pelangganBatchBadgeText}>
+                    {selectedTagihanIds.length} Terpilih
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => setSelectedTagihanIds([])}
+                  style={styles.pelangganBatchCancelBtn}
+                >
+                  <Text style={styles.pelangganBatchCancelText}>Batal</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={handleDeleteCollectiveTagihan}
+                style={styles.pelangganBatchDeleteBtn}
+              >
+                <Ionicons name="trash" size={14} color="#FFFFFF" style={{ marginRight: 5 }} />
+                <Text style={styles.pelangganBatchDeleteText}>
+                  Hapus ({selectedTagihanIds.length})
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         {/* Modal Pop-up Pilih Bulan & Tahun */}
         {renderPeriodPickerModal()}
@@ -2348,13 +2868,18 @@ function MainApp() {
         <View style={styles.mapScreenContainer}>
           <MapViewer
             userLocation={userLocation}
+            userHeading={userHeading}
             customers={rutePelanggan}
+            onOpenFotoPersil={handleOpenFotoPersilFromMap}
+            isPhotoModalOpen={!!selectedPhotoFull}
             style={styles.mapViewerStyle}
           />
         </View>
 
         {/* Modal Pemilihan Periode (Bulan & Tahun) */}
         {renderPeriodPickerModal()}
+        {/* Modal Fullscreen Viewer Foto Persil */}
+        {renderPhotoViewerModal()}
       </SafeAreaView>
     );
   }
@@ -2386,15 +2911,17 @@ function MainApp() {
         </View>
 
         <View style={styles.pelangganContainer}>
-          {/* Search Input Bar (Identik Gambar) */}
+          {/* Search Input Bar (Hanya Nomor SMB) */}
           <View style={styles.pelangganSearchBox}>
             <Ionicons name="search" size={20} color="#60A5FA" style={styles.pelangganSearchIcon} />
             <TextInput
               style={styles.pelangganSearchInput}
-              placeholder="Cari No. Sambungan atau Nama Pelanggan..."
+              placeholder="Cari No. SMB (xx-xxxxx)..."
               placeholderTextColor="#94A3B8"
               value={pelangganSearchQuery}
-              onChangeText={setPelangganSearchQuery}
+              onChangeText={handleSearchPelangganSmbChange}
+              maxLength={8}
+              keyboardType="numeric"
             />
             {pelangganSearchQuery.length > 0 && (
               <TouchableOpacity onPress={() => setPelangganSearchQuery('')} activeOpacity={0.7}>
@@ -2451,7 +2978,7 @@ function MainApp() {
               <Text style={styles.pelangganEmptyDesc}>
                 {daftarPelanggan.length === 0
                   ? 'Tekan tombol "Tambah Pelanggan Manual" di bawah untuk menambahkan data.'
-                  : 'Tidak ada data pelanggan yang cocok dengan kata kunci pencarian.'}
+                  : `Tidak ada data pelanggan yang cocok dengan Nomor SMB "${pelangganSearchQuery}".`}
               </Text>
             </View>
           ) : (
@@ -2681,6 +3208,70 @@ function MainApp() {
 
   // Screen: Pilih Titik Alamat Rumah (Google Maps dengan Pin Geser)
   if (currentScreen === 'pilih_titik_alamat') {
+    const isEditingCustomer = Boolean(editingPelangganForMap);
+    const customerTitle = isEditingCustomer
+      ? `Edit Titik Maps: ${editingPelangganForMap.nama || editingPelangganForMap.noSmb}`
+      : 'Pilih Titik Rumah';
+    const customerSubtitle = tempPickerCoords
+      ? `GPS: ${tempPickerCoords.lat.toFixed(6)}, ${tempPickerCoords.lng.toFixed(6)}`
+      : 'Geser pin ke titik rumah pelanggan';
+
+    const handleConfirmSelection = (targetCoords) => {
+      const target = targetCoords || tempPickerCoords || (isEditingCustomer ? parseCustomerCoords(editingPelangganForMap) : null) || userLocation || { lat: -7.1539, lng: 112.6561 };
+      const newCoordsFormatted = `(${target.lat.toFixed(6)}, ${target.lng.toFixed(6)})`;
+
+      if (isEditingCustomer) {
+        // 1. Simpan ke master data pelanggan & storage
+        setDaftarPelanggan((prev) => {
+          const updated = prev.map((p) => {
+            if (p.id === editingPelangganForMap.id || (p.noSmb && p.noSmb === editingPelangganForMap.noSmb)) {
+              return {
+                ...p,
+                koordinat: newCoordsFormatted,
+                latitude: target.lat,
+                longitude: target.lng,
+              };
+            }
+            return p;
+          });
+          savePelangganToInternalStorage(updated);
+          return updated;
+        });
+
+        // 2. Simpan juga ke daftar tagihan jika ada
+        setDaftarTagihanPelanggan((prev) => {
+          const updated = prev.map((t) => {
+            if (t.pelangganId === editingPelangganForMap.id || (t.noSmb && t.noSmb === editingPelangganForMap.noSmb)) {
+              return {
+                ...t,
+                koordinat: newCoordsFormatted,
+                latitude: target.lat,
+                longitude: target.lng,
+              };
+            }
+            return t;
+          });
+          saveTagihanToInternalStorage(updated);
+          return updated;
+        });
+
+        if (Platform.OS === 'android') {
+          ToastAndroid.show('Titik koordinat berhasil disimpan!', ToastAndroid.SHORT);
+        } else if (Platform.OS === 'web') {
+          alert(`Titik koordinat "${editingPelangganForMap.nama || editingPelangganForMap.noSmb}" berhasil diperbarui:\n${newCoordsFormatted}`);
+        } else {
+          Alert.alert('Sukses', `Titik koordinat berhasil diperbarui:\n${newCoordsFormatted}`);
+        }
+
+        setEditingPelangganForMap(null);
+        setCurrentScreen('data_pelanggan');
+      } else {
+        // Alur reguler tambah pelanggan manual
+        setManualCoords(`${target.lat.toFixed(6)}, ${target.lng.toFixed(6)}`);
+        setCurrentScreen('tambah_pelanggan_manual');
+      }
+    };
+
     return (
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right', 'bottom']}>
         <StatusBar style="dark" backgroundColor="#FFFFFF" />
@@ -2689,27 +3280,28 @@ function MainApp() {
         <View style={styles.headerBar}>
           <TouchableOpacity
             style={styles.backBtn}
-            onPress={() => setCurrentScreen('tambah_pelanggan_manual')}
+            onPress={() => {
+              if (isEditingCustomer) {
+                setEditingPelangganForMap(null);
+                setCurrentScreen('data_pelanggan');
+              } else {
+                setCurrentScreen('tambah_pelanggan_manual');
+              }
+            }}
             activeOpacity={0.7}
           >
             <Ionicons name="arrow-back" size={22} color="#0F172A" />
           </TouchableOpacity>
           <View style={styles.headerTitleContainer}>
-            <Text style={styles.headerTitle} numberOfLines={1}>Pilih Titik Rumah</Text>
+            <Text style={styles.headerTitle} numberOfLines={1}>{customerTitle}</Text>
             <Text style={styles.headerSubtitle} numberOfLines={1}>
-              {tempPickerCoords
-                ? `GPS: ${tempPickerCoords.lat.toFixed(6)}, ${tempPickerCoords.lng.toFixed(6)}`
-                : 'Geser pin ke titik rumah pelanggan'}
+              {customerSubtitle}
             </Text>
           </View>
           <TouchableOpacity
             style={styles.headerGunakanBtn}
             activeOpacity={0.8}
-            onPress={() => {
-              const target = tempPickerCoords || userLocation || { lat: -7.1539, lng: 112.6561 };
-              setManualCoords(`${target.lat.toFixed(6)}, ${target.lng.toFixed(6)}`);
-              setCurrentScreen('tambah_pelanggan_manual');
-            }}
+            onPress={() => handleConfirmSelection()}
           >
             <Text style={styles.headerGunakanBtnText}>Pilih</Text>
           </TouchableOpacity>
@@ -2719,18 +3311,19 @@ function MainApp() {
         <View style={styles.mapScreenContainer}>
           <MapPicker
             initialCoords={
-              manualCoords
-                ? {
-                  lat: parseFloat(manualCoords.split(',')[0]) || -7.1539,
-                  lng: parseFloat(manualCoords.split(',')[1]) || 112.6561,
-                }
-                : userLocation || { lat: -7.1539, lng: 112.6561 }
+              isEditingCustomer
+                ? (parseCustomerCoords(editingPelangganForMap) || userLocation || { lat: -7.1539, lng: 112.6561 })
+                : (manualCoords
+                  ? {
+                    lat: parseFloat(manualCoords.split(',')[0]) || -7.1539,
+                    lng: parseFloat(manualCoords.split(',')[1]) || 112.6561,
+                  }
+                  : userLocation || { lat: -7.1539, lng: 112.6561 })
             }
             onSelectCoords={(lat, lng, isConfirm) => {
               setTempPickerCoords({ lat, lng });
               if (isConfirm) {
-                setManualCoords(`${lat.toFixed(6)}, ${lng.toFixed(6)}`);
-                setCurrentScreen('tambah_pelanggan_manual');
+                handleConfirmSelection({ lat, lng });
               }
             }}
             style={styles.mapViewerStyle}
@@ -2776,7 +3369,7 @@ function MainApp() {
             <View style={styles.heroTextContainer}>
               <Text style={styles.heroTitle}>Mulai Tagihan</Text>
               <Text style={styles.heroDescription}>
-                Pilih periode tagihan, kelola daftar tagihan &amp; buat rute pengantaran optimal
+                Pilih periode tagihan, kelola daftar tagihan &amp; buat rute tagihan optimal
               </Text>
             </View>
 
@@ -2816,7 +3409,11 @@ function MainApp() {
         </TouchableOpacity>
 
         {/* Card 2: SPK TS */}
-        <View style={styles.actionCard}>
+        <TouchableOpacity
+          style={styles.actionCard}
+          activeOpacity={0.88}
+          onPress={() => setTsNoticeModalVisible(true)}
+        >
           <View style={[styles.cardIconBox, { backgroundColor: '#FEF6E4' }]}>
             <Ionicons name="warning" size={26} color="#F59E0B" />
           </View>
@@ -2834,10 +3431,14 @@ function MainApp() {
           </View>
 
           <Ionicons name="chevron-forward" size={18} color="#94A3B8" style={styles.cardChevron} />
-        </View>
+        </TouchableOpacity>
 
         {/* Card 3: Janji Bayar */}
-        <View style={styles.actionCard}>
+        <TouchableOpacity
+          style={styles.actionCard}
+          activeOpacity={0.88}
+          onPress={() => setTsNoticeModalVisible(true)}
+        >
           <View style={[styles.cardIconBox, { backgroundColor: '#E6F9F0' }]}>
             <Text style={{ fontSize: 24 }}>🤝</Text>
           </View>
@@ -2855,6 +3456,13 @@ function MainApp() {
           </View>
 
           <Ionicons name="chevron-forward" size={18} color="#94A3B8" style={styles.cardChevron} />
+        </TouchableOpacity>
+
+        {/* Footer Copyright Halaman Utama */}
+        <View style={styles.homeFooterContainer}>
+          <Text style={styles.homeFooterCopyrightText}>
+            © 2026 Dibuat oleh Septian Wahyu T, dan Dikembangkan oleh Erwin Dwi K.
+          </Text>
         </View>
       </ScrollView>
 
@@ -2945,6 +3553,9 @@ function MainApp() {
 
       {/* Modal Pop-up Berhasil Ditambahkan */}
       {renderSuccessModal()}
+
+      {/* Modal Pop-up Pemberitahuan Sistem Belum Berfungsi */}
+      {renderTSNoticeModal()}
     </SafeAreaView>
   );
 }
@@ -3206,7 +3817,7 @@ const styles = StyleSheet.create({
   },
   formScrollContent: {
     paddingHorizontal: 16,
-    paddingTop: 16,
+    paddingTop: 10,
     paddingBottom: 60,
   },
 
@@ -4108,6 +4719,36 @@ const styles = StyleSheet.create({
       },
     }),
   },
+  tagihanBottomBarContainer: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    backgroundColor: '#F8FAFC',
+  },
+  tagihanFloatingBatchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1.2,
+    borderColor: '#FECACA',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#EF4444',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.18,
+        shadowRadius: 8,
+      },
+      android: {
+        elevation: 4,
+      },
+      web: {
+        boxShadow: '0 4px 16px rgba(239, 68, 68, 0.18)',
+      },
+    }),
+  },
   pelangganBatchLeft: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -4233,20 +4874,39 @@ const styles = StyleSheet.create({
     backgroundColor: '#ECFDF5',
     borderWidth: 1,
     borderColor: '#A7F3D0',
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginRight: 4,
+    paddingHorizontal: 4.5,
+    paddingVertical: 1,
+    borderRadius: 5,
+    height: 18,
+    marginRight: 0,
   },
   tagihanJarakText: {
-    fontSize: 11,
+    fontSize: 9.5,
     fontWeight: '700',
     color: '#047857',
+  },
+  tagihanSelesaiBtn: {
+    width: 18,
+    height: 18,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    backgroundColor: '#F8FAFC',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  tagihanSelesaiBtnActive: {
+    backgroundColor: '#10B981',
+    borderColor: '#059669',
   },
   pelangganTopActionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 4,
+  },
+  pelangganItemCardSelesai: {
+    backgroundColor: '#F9FCF9',
+    borderColor: '#A7F3D0',
   },
   tagihanCardMainRow: {
     flexDirection: 'row',
@@ -4367,46 +5027,90 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E2E8F0',
     borderRadius: 12,
-    padding: 10,
+    padding: 8,
     marginTop: 4,
   },
   pelangganCoordIconCircle: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: '#FEE2E2',
     justifyContent: 'center',
     alignItems: 'center',
   },
   pelangganCoordTextContainer: {
     flex: 1,
-    marginLeft: 10,
+    marginLeft: 8,
+    marginRight: 6,
   },
   pelangganCoordTitle: {
-    fontSize: 10.5,
+    fontSize: 10,
     color: '#64748B',
     fontWeight: '500',
   },
   pelangganCoordValue: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
     color: '#0F172A',
     marginTop: 1,
   },
+  pelangganCoordButtonsContainer: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    justifyContent: 'center',
+    gap: 10,
+    marginLeft: 8,
+  },
   pelangganBukaPetaBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: '#EAF1FB',
     paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingVertical: 5.5,
+    borderRadius: 7,
     borderWidth: 1,
     borderColor: '#BFDBFE',
+    minWidth: 94,
   },
   pelangganBukaPetaBtnText: {
-    fontSize: 11.5,
+    fontSize: 10.5,
     fontWeight: '700',
     color: '#07326E',
+  },
+  pelangganEditMapsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 10,
+    paddingVertical: 5.5,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+    minWidth: 94,
+  },
+  pelangganEditMapsBtnText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#047857',
+  },
+  pelangganPerbaruiMapsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 10,
+    paddingVertical: 5.5,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+    minWidth: 94,
+  },
+  pelangganPerbaruiMapsBtnText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#047857',
   },
 
   /* Form Foto Persil pada Daftar Tagihan */
@@ -4636,15 +5340,29 @@ const styles = StyleSheet.create({
   },
 
   /* Styles Section Tagihan Pelanggan */
+  tagihanFixedHeaderContainer: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    backgroundColor: '#F8FAFC',
+    zIndex: 10,
+  },
+  tagihanScrollContainer: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+  },
+  tagihanScrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 4,
+  },
   tagihanPelangganSection: {
-    marginTop: 18,
-    marginBottom: 10,
+    marginTop: 4,
+    marginBottom: 6,
   },
   tagihanPelangganHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 12,
+    marginBottom: 7,
   },
   tagihanPelangganSectionTitle: {
     fontSize: 12.5,
@@ -4852,13 +5570,14 @@ const styles = StyleSheet.create({
   /* Banner Periode Aktif pada Layar Daftar Tagihan */
   activePeriodCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 16,
+    borderRadius: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1.2,
     borderColor: '#E2E8F0',
-    marginBottom: 16,
+    marginBottom: 6,
     ...Platform.select({
       ios: {
         shadowColor: '#0F172A',
@@ -4875,27 +5594,27 @@ const styles = StyleSheet.create({
     }),
   },
   activePeriodIconBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 38,
+    height: 38,
+    borderRadius: 12,
     backgroundColor: '#EAF1FB',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 12,
+    marginRight: 10,
   },
   activePeriodInfo: {
     flex: 1,
   },
   activePeriodLabel: {
-    fontSize: 10.5,
+    fontSize: 9.5,
     fontWeight: '800',
     color: '#64748B',
-    letterSpacing: 0.6,
+    letterSpacing: 0.5,
     textTransform: 'uppercase',
-    marginBottom: 2,
+    marginBottom: 1,
   },
   activePeriodValue: {
-    fontSize: 17,
+    fontSize: 15.5,
     fontWeight: '800',
     color: '#07326E',
   },
@@ -4903,14 +5622,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#F1F5F9',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 5.5,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#E2E8F0',
   },
   activePeriodActionText: {
-    fontSize: 12,
+    fontSize: 11.5,
     fontWeight: '700',
     color: '#07326E',
   },
@@ -5148,5 +5867,96 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+
+  /* Modal Pop-up "Sistem Belum Berfungsi" (Pelanggan TS & Pembukaan TS) */
+  tsModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+    zIndex: 9999,
+  },
+  tsModalCard: {
+    width: '100%',
+    maxWidth: 340,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    paddingHorizontal: 22,
+    paddingTop: 26,
+    paddingBottom: 22,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#0F172A',
+        shadowOffset: { width: 0, height: 12 },
+        shadowOpacity: 0.2,
+        shadowRadius: 28,
+      },
+      android: {
+        elevation: 12,
+      },
+      web: {
+        boxShadow: '0 16px 36px -6px rgba(15, 23, 42, 0.25)',
+      },
+    }),
+  },
+  tsModalIconCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: '#FEF3C7',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+    borderWidth: 2,
+    borderColor: '#FDE68A',
+  },
+  tsModalTitle: {
+    fontSize: 18.5,
+    fontWeight: '800',
+    color: '#0F172A',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  tsModalMessage: {
+    fontSize: 13.5,
+    color: '#475569',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 22,
+  },
+  tsModalBtn: {
+    width: '100%',
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: '#07326E',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  tsModalBtnText: {
+    fontSize: 13.5,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+
+  /* Footer Copyright Halaman Utama */
+  homeFooterContainer: {
+    marginTop: 22,
+    marginBottom: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  homeFooterCopyrightText: {
+    fontSize: 10.5,
+    color: '#94A3B8',
+    textAlign: 'center',
+    fontWeight: '500',
+    letterSpacing: 0.2,
+    lineHeight: 16,
   },
 });
