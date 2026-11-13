@@ -7,6 +7,15 @@ export default function MapViewer({ style, userLocation, userHeading, customers 
   const webViewRef = useRef(null);
   const isLoadedRef = useRef(false);
 
+  const latestCustomersRef = useRef(customers);
+  latestCustomersRef.current = customers;
+
+  const latestUserLocationRef = useRef(userLocation);
+  latestUserLocationRef.current = userLocation;
+
+  const latestUserHeadingRef = useRef(userHeading);
+  latestUserHeadingRef.current = userHeading;
+
   // Simpan HTML awal dalam ref agar WebView TIDAK PERNAH me-reload saat koordinat GPS terupdate
   const initialCoordsRef = useRef(userLocation);
   const initialCustomersRef = useRef(customers);
@@ -15,22 +24,36 @@ export default function MapViewer({ style, userLocation, userHeading, customers 
     htmlRef.current = getMapHtml(initialCoordsRef.current, initialCustomersRef.current);
   }
 
-  const sendLocationToWebView = (loc) => {
+  const lastLocRef = useRef(null);
+  const sendLocationToWebView = (loc, force = false) => {
     if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number') return;
-    if (webViewRef.current && isLoadedRef.current) {
-      const headingVal = (typeof loc.heading === 'number' && !isNaN(loc.heading)) ? loc.heading : 'null';
-      const jsCode = `
-        if (typeof window.handleLocationUpdate === 'function') {
-          window.handleLocationUpdate(${loc.lat}, ${loc.lng}, ${loc.accuracy || 10}, ${headingVal});
-        }
-        true;
-      `;
-      webViewRef.current.injectJavaScript(jsCode);
+    if (!webViewRef.current || !isLoadedRef.current) return;
+
+    if (!force && lastLocRef.current) {
+      const dLat = Math.abs(lastLocRef.current.lat - loc.lat);
+      const dLng = Math.abs(lastLocRef.current.lng - loc.lng);
+      if (dLat < 0.000008 && dLng < 0.000008 && Math.abs((lastLocRef.current.heading || 0) - (loc.heading || 0)) < 1.5) {
+        return;
+      }
     }
+    lastLocRef.current = loc;
+    const headingVal = (typeof loc.heading === 'number' && !isNaN(loc.heading)) ? loc.heading : 'null';
+    const jsCode = `
+      if (typeof window.handleLocationUpdate === 'function') {
+        window.handleLocationUpdate(${loc.lat}, ${loc.lng}, ${loc.accuracy || 10}, ${headingVal});
+      }
+      true;
+    `;
+    webViewRef.current.injectJavaScript(jsCode);
   };
 
+  const lastHeadingRef = useRef(null);
   const sendHeadingToWebView = (heading) => {
     if (typeof heading !== 'number' || isNaN(heading)) return;
+    if (lastHeadingRef.current !== null && Math.abs(lastHeadingRef.current - heading) < 2.5) {
+      return;
+    }
+    lastHeadingRef.current = heading;
     if (webViewRef.current && isLoadedRef.current) {
       const jsCode = `
         if (typeof window.handleHeadingUpdate === 'function') {
@@ -42,35 +65,61 @@ export default function MapViewer({ style, userLocation, userHeading, customers 
     }
   };
 
-  const sendCustomersToWebView = (custList) => {
-    if (webViewRef.current && isLoadedRef.current) {
-      const jsonStr = JSON.stringify(custList || []);
-      const jsCode = `
-        try {
-          if (typeof window.updateCustomersData === 'function') {
-            window.updateCustomersData(${JSON.stringify(jsonStr)});
-          }
-        } catch (e) {
-          console.warn('Gagal update pelanggan:', e);
-        }
-        true;
-      `;
-      webViewRef.current.injectJavaScript(jsCode);
+  const lastCustomersFingerprintRef = useRef('');
+  const getCustomersFingerprint = (list) => {
+    if (!Array.isArray(list)) return '';
+    return list.map((c) => {
+      if (!c) return '';
+      const id = c.id || c.tagihanId || c.noSmb || '';
+      const lat = c.lat !== undefined ? c.lat : c.latitude;
+      const lng = c.lng !== undefined ? c.lng : c.longitude;
+      const foto = c.fotoPersil ? '1' : '0';
+      return `${id}:${lat}:${lng}:${foto}`;
+    }).join('|');
+  };
+
+  const sendCustomersToWebView = (custList, force = false) => {
+    if (!webViewRef.current || !isLoadedRef.current) return;
+    const fingerprint = getCustomersFingerprint(custList);
+    if (!force && fingerprint && fingerprint === lastCustomersFingerprintRef.current) {
+      // Data pelanggan tidak berubah, jangan injeksi JavaScript agar peta tidak reload/berkedip saat GPS bergerak
+      return;
     }
+    lastCustomersFingerprintRef.current = fingerprint;
+
+    const jsonStr = JSON.stringify(custList || []);
+    const jsCode = `
+      try {
+        if (typeof window.updateCustomersData === 'function') {
+          window.updateCustomersData(${jsonStr});
+        }
+      } catch (e) {
+        console.warn('Gagal update pelanggan:', e);
+      }
+      true;
+    `;
+    webViewRef.current.injectJavaScript(jsCode);
   };
 
   useEffect(() => {
-    sendLocationToWebView(userLocation);
+    latestUserLocationRef.current = userLocation;
+    if (isLoadedRef.current) {
+      sendLocationToWebView(userLocation);
+    }
   }, [userLocation]);
 
   useEffect(() => {
-    if (userHeading !== null && userHeading !== undefined) {
+    latestUserHeadingRef.current = userHeading;
+    if (isLoadedRef.current && userHeading !== null && userHeading !== undefined) {
       sendHeadingToWebView(userHeading);
     }
   }, [userHeading]);
 
   useEffect(() => {
-    sendCustomersToWebView(customers);
+    latestCustomersRef.current = customers;
+    if (isLoadedRef.current) {
+      sendCustomersToWebView(customers);
+    }
   }, [customers]);
 
   // Saat modal foto persil ditutup, pastikan rute dan canvas Leaflet langsung disegarkan & digambar ulang
@@ -98,17 +147,31 @@ export default function MapViewer({ style, userLocation, userHeading, customers 
     prevModalOpenRef.current = !!isPhotoModalOpen;
   }, [isPhotoModalOpen]);
 
+  const webViewSource = React.useMemo(() => ({ html: htmlRef.current }), []);
+
   return (
     <View style={[styles.container, style]}>
       <WebView
         ref={webViewRef}
         originWhitelist={['*']}
-        source={{ html: htmlRef.current }}
+        source={webViewSource}
         style={styles.webView}
         javaScriptEnabled={true}
         domStorageEnabled={true}
         geolocationEnabled={true}
+        mixedContentMode="always"
+        allowFileAccess={true}
+        allowUniversalAccessFromFileURLs={true}
+        allowFileAccessFromFileURLs={true}
         startInLoadingState={true}
+        onError={(syntheticEvent) => {
+          const { nativeEvent } = syntheticEvent;
+          console.warn('WebView error: ', nativeEvent);
+        }}
+        onHttpError={(syntheticEvent) => {
+          const { nativeEvent } = syntheticEvent;
+          console.warn('WebView HTTP error: ', nativeEvent.statusCode, nativeEvent.url);
+        }}
         onMessage={(event) => {
           try {
             const raw = event.nativeEvent.data;
@@ -126,14 +189,17 @@ export default function MapViewer({ style, userLocation, userHeading, customers 
         }}
         onLoadEnd={() => {
           isLoadedRef.current = true;
-          if (userLocation) {
-            setTimeout(() => sendLocationToWebView(userLocation), 400);
+          const currLoc = latestUserLocationRef.current;
+          if (currLoc) {
+            sendLocationToWebView(currLoc, true);
           }
-          if (userHeading !== null && userHeading !== undefined) {
-            setTimeout(() => sendHeadingToWebView(userHeading), 500);
+          const currHeading = latestUserHeadingRef.current;
+          if (currHeading !== null && currHeading !== undefined) {
+            sendHeadingToWebView(currHeading);
           }
-          if (customers && customers.length > 0) {
-            setTimeout(() => sendCustomersToWebView(customers), 600);
+          const currCusts = latestCustomersRef.current;
+          if (currCusts && currCusts.length > 0) {
+            sendCustomersToWebView(currCusts, false);
           }
         }}
         renderLoading={() => (

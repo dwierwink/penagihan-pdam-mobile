@@ -2,7 +2,7 @@
   "expo": {
     "name": "Penagihan PDAM",
     "slug": "penagihan-pdam-mobile",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -16,12 +16,15 @@
     },
     "android": {
       "package": "com.dwierwink.penagihanpdam",
-      "versionCode": 5,
+      "versionCode": 6,
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#FFFFFF",
         "foregroundImage": "./assets/android-icon-foreground.png"
       },
       "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
         "CAMERA",

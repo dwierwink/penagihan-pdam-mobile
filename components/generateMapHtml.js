@@ -2,38 +2,72 @@ export function getMapHtml(initialCoords, customers = []) {
   const initLat = (initialCoords && typeof initialCoords.lat === 'number') ? initialCoords.lat : -7.1539;
   const initLng = (initialCoords && typeof initialCoords.lng === 'number') ? initialCoords.lng : 112.6561;
 
-  // Ekstrak & sanitasi data koordinat pelanggan asli
+  const parseVal = (v) => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number') return (!isNaN(v) && isFinite(v) && v !== 0) ? v : null;
+    if (typeof v === 'string') {
+      const s = v.trim().replace(',', '.');
+      if (!s || s === '-' || s === '0' || s.toLowerCase() === 'null' || s.toLowerCase() === 'nan') return null;
+      const num = parseFloat(s);
+      return (!isNaN(num) && isFinite(num) && num !== 0) ? num : null;
+    }
+    return null;
+  };
+
+  const sanitizeLatLng = (rawLat, rawLng) => {
+    if (rawLat === null || rawLng === null) return null;
+    let lat = rawLat;
+    let lng = rawLng;
+    if (lat > 50 && lng < 20) {
+      const temp = lat;
+      lat = lng;
+      lng = temp;
+    }
+    if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && (lat !== 0 || lng !== 0)) {
+      return { lat, lng };
+    }
+    return null;
+  };
+
+  // Ekstrak & sanitasi data koordinat pelanggan asli (100% selaras dengan Daftar Tagihan)
   const sanitizedCustomers = Array.isArray(customers)
     ? customers
-        .map((c) => {
+        .map((c, index) => {
           if (!c) return null;
           let lat = null;
           let lng = null;
-          if (
-            typeof c.latitude === 'number' &&
-            typeof c.longitude === 'number' &&
-            !isNaN(c.latitude) &&
-            !isNaN(c.longitude)
-          ) {
-            lat = c.latitude;
-            lng = c.longitude;
-          } else if (
-            typeof c.lat === 'number' &&
-            typeof c.lng === 'number' &&
-            !isNaN(c.lat) &&
-            !isNaN(c.lng)
-          ) {
-            lat = c.lat;
-            lng = c.lng;
+
+          const directLat = parseVal(c.lat !== undefined ? c.lat : c.latitude);
+          const directLng = parseVal(c.lng !== undefined ? c.lng : c.longitude);
+          const directRes = sanitizeLatLng(directLat, directLng);
+          if (directRes) {
+            lat = directRes.lat;
+            lng = directRes.lng;
           } else if (c.koordinat && typeof c.koordinat === 'string') {
-            const cleanStr = c.koordinat.replace(/[()]/g, '');
-            const parts = cleanStr.split(',').map((s) => parseFloat(s.trim()));
-            if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-              lat = parts[0];
-              lng = parts[1];
+            const cleanStr = c.koordinat.replace(/[()]/g, '').trim();
+            if (cleanStr && cleanStr !== '-' && cleanStr !== '0' && cleanStr !== '0,0' && cleanStr !== '0, 0') {
+              const parts = cleanStr.includes(';') ? cleanStr.split(';') : cleanStr.split(',');
+              if (parts.length >= 2) {
+                const strRes = sanitizeLatLng(parseVal(parts[0]), parseVal(parts[1]));
+                if (strRes) {
+                  lat = strRes.lat;
+                  lng = strRes.lng;
+                }
+              }
+            }
+          } else if (c._coords && typeof c._coords === 'object') {
+            const coordsRes = sanitizeLatLng(
+              parseVal(c._coords.lat !== undefined ? c._coords.lat : c._coords.latitude),
+              parseVal(c._coords.lng !== undefined ? c._coords.lng : c._coords.longitude)
+            );
+            if (coordsRes) {
+              lat = coordsRes.lat;
+              lng = coordsRes.lng;
             }
           }
+
           if (lat === null || lng === null) return null;
+
           return {
             id: String(c.id || c.tagihanId || Math.random()),
             nama: String(c.nama || c.name || 'Pelanggan'),
@@ -46,6 +80,13 @@ export function getMapHtml(initialCoords, customers = []) {
         .filter(Boolean)
     : [];
 
+  let startLat = initLat;
+  let startLng = initLng;
+  if (sanitizedCustomers.length > 0 && typeof sanitizedCustomers[0].lat === 'number' && typeof sanitizedCustomers[0].lng === 'number') {
+    startLat = sanitizedCustomers[0].lat;
+    startLng = sanitizedCustomers[0].lng;
+  }
+
   const customersJson = JSON.stringify(sanitizedCustomers);
 
   return `<!DOCTYPE html>
@@ -53,12 +94,28 @@ export function getMapHtml(initialCoords, customers = []) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <!-- Kebijakan Keamanan Terbuka Bebas Blokir untuk Semua CDN, Script, Tile, dan API Rute -->
+  <meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob: gap: https: http:; script-src * 'unsafe-inline' 'unsafe-eval' data: blob: https: http:; style-src * 'unsafe-inline' data: blob: https: http:; img-src * data: blob: https: http:; connect-src * https: http: ws: wss:; font-src * data: https: http:;" />
   <title>Google Maps Rute Tagihan PDAM Real-Time</title>
   
-  <!-- Leaflet CSS & JS + Leaflet Rotate Plugin -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
-  <script src="https://unpkg.com/leaflet-rotate@0.5.2/dist/leaflet-rotate.js"></script>
+  <!-- Leaflet CSS (Multi-CDN Anti-Blokir: unpkg -> cdnjs) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" onerror="this.onerror=null;this.href='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';" />
+  
+  <!-- Leaflet JS (Multi-CDN Anti-Blokir dengan Failover Otomatis) -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    if (typeof L === 'undefined') {
+      document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"><\\/script>');
+    }
+  </script>
+  <script>
+    if (typeof L === 'undefined') {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"><\\/script>');
+    }
+  </script>
+
+  <!-- Leaflet Rotate Plugin (dengan fallback failover) -->
+  <script src="https://unpkg.com/leaflet-rotate@0.5.2/dist/leaflet-rotate.js" onerror="this.onerror=null;var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/leaflet-rotate@0.5.2/dist/leaflet-rotate.js';document.head.appendChild(s);"></script>
 
   <style>
     * {
@@ -202,110 +259,73 @@ export function getMapHtml(initialCoords, customers = []) {
       border-color: #059669;
     }
 
-    /* Floating Side Buttons (GPS & Layer) */
-    .floating-buttons {
-      position: absolute;
-      right: 12px;
-      top: 110px;
-      z-index: 1000;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .fab {
-      width: 44px;
-      height: 44px;
-      background: #ffffff;
-      border: 1px solid #cbd5e1;
-      border-radius: 22px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      cursor: pointer;
-      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
-      font-size: 20px;
-      transition: all 0.2s;
-    }
-    .fab.active-tracking {
-      background: #dcfce7;
-      border-color: #16a34a;
-      box-shadow: 0 0 12px rgba(22, 163, 74, 0.4);
-    }
-    .fab:active {
-      transform: scale(0.92);
-    }
-
-    /* Tombol Kompas Penunjuk Arah */
-    .fab-compass {
-      width: 44px;
-      height: 44px;
-      background: #ffffff;
-      border: 1px solid #cbd5e1;
-      border-radius: 22px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      cursor: pointer;
-      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
-      transition: all 0.2s;
-    }
-    .fab-compass:active {
-      transform: scale(0.92);
-    }
-    .compass-icon-wrapper {
-      width: 28px;
-      height: 28px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      transition: transform 0.15s ease-out;
-    }
-    .compass-needle-svg {
-      width: 24px;
-      height: 24px;
-    }
 
     /* Custom GPS Marker Pulse Radar dengan Pergerakan Halus & Panah Arah Hadap */
     .gps-ring-container {
-      width: 28px;
-      height: 28px;
+      width: 32px;
+      height: 32px;
       position: relative;
       pointer-events: none;
     }
     .gps-marker-ring {
-      width: 28px;
-      height: 28px;
+      width: 32px;
+      height: 32px;
       border-radius: 50%;
-      background: rgba(37, 99, 235, 0.3);
-      border: 2px solid #2563eb;
-      animation: ring-pulse 1.6s infinite ease-out;
+      background: rgba(37, 99, 235, 0.25);
+      border: 1.5px solid rgba(37, 99, 235, 0.7);
+      animation: ring-pulse 1.8s infinite ease-out;
     }
     .gps-marker-core {
-      width: 14px;
-      height: 14px;
+      width: 16px;
+      height: 16px;
       border-radius: 50%;
       background: #2563eb;
       position: absolute;
-      top: 7px;
-      left: 7px;
-      border: 2.5px solid #ffffff;
-      box-shadow: 0 0 10px rgba(37, 99, 235, 0.8);
+      top: 8px;
+      left: 8px;
+      border: 3px solid #ffffff;
+      box-shadow: 0 0 12px rgba(37, 99, 235, 0.9);
     }
     /* Panah Arah Hadap pada Marker GPS */
     .gps-heading-cone {
       position: absolute;
-      top: -12px;
-      left: 7px;
-      width: 14px;
-      height: 14px;
-      transform-origin: 7px 21px;
+      top: -14px;
+      left: 8px;
+      width: 16px;
+      height: 16px;
+      transform-origin: 8px 30px;
       transition: transform 0.2s ease-out;
       pointer-events: none;
       display: none;
     }
     @keyframes ring-pulse {
       0% { transform: scale(0.5); opacity: 1; }
-      100% { transform: scale(2.0); opacity: 0; }
+      100% { transform: scale(2.2); opacity: 0; }
+    }
+
+    /* Tooltip Penanda Lokasi Saya */
+    .my-location-tooltip {
+      background-color: #2563eb !important;
+      color: #ffffff !important;
+      font-weight: 800 !important;
+      font-size: 11.5px !important;
+      padding: 3px 9px !important;
+      border-radius: 12px !important;
+      border: 1.5px solid #ffffff !important;
+      box-shadow: 0 2px 8px rgba(37, 99, 235, 0.45) !important;
+      white-space: nowrap !important;
+      pointer-events: none !important;
+      user-select: none !important;
+      -webkit-user-select: none !important;
+    }
+    .my-location-tooltip::before {
+      border-top-color: #2563eb !important;
+    }
+
+    /* Custom Pin Marker Pelanggan */
+    .custom-customer-pin {
+      background: transparent !important;
+      border: none !important;
     }
 
     /* Tooltip & Popup Nama Pelanggan pada Maps (Hanya Nama Pelanggan Saja) */
@@ -336,10 +356,51 @@ export function getMapHtml(initialCoords, customers = []) {
       margin: 8px 12px !important;
       line-height: 1.3 !important;
     }
+
+    /* Floating Zoom Controls (+ / -) */
+    .floating-zoom-container {
+      position: absolute;
+      bottom: 22px;
+      right: 14px;
+      z-index: 999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .floating-zoom-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.96);
+      color: #07326e;
+      border: 1px solid #cbd5e1;
+      font-size: 22px;
+      font-weight: 700;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.2);
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
+      transition: transform 0.12s ease, background 0.15s ease;
+    }
+    .floating-zoom-btn:active {
+      transform: scale(0.92);
+      background: #e2e8f0;
+    }
   </style>
 </head>
 <body>
   <div id="map"></div>
+
+  <!-- Floating Zoom In / Zoom Out Controls (Ultra Halus) -->
+  <div class="floating-zoom-container">
+    <button id="btn-zoom-in" class="floating-zoom-btn" type="button" aria-label="Perbesar">+</button>
+    <button id="btn-zoom-out" class="floating-zoom-btn" type="button" aria-label="Perkecil">−</button>
+  </div>
 
   <!-- Top Search Controls -->
   <div class="top-controls">
@@ -363,31 +424,13 @@ export function getMapHtml(initialCoords, customers = []) {
 
     <!-- Quick Filter Chips -->
     <div class="chip-row">
-      <div id="chip-follow" class="chip following">🎯 Ikuti Posisi Saya (Aktif)</div>
+      <div id="chip-follow" class="chip">🎯 Ikuti Posisi Saya</div>
       <div id="chip-heading" class="chip">🧭 Sesuai Arah</div>
       <div id="chip-rute" class="chip active">🛣️ Rute Jalan Pelanggan</div>
       <div id="chip-layer" class="chip">🛰️ Peta Satelit</div>
     </div>
   </div>
 
-  <!-- Floating Action Buttons -->
-  <div class="floating-buttons">
-    <div id="fab-compass" class="fab-compass" title="Arah Kompas (Ketuk untuk Reset ke Utara)">
-      <div id="compass-icon-wrapper" class="compass-icon-wrapper">
-        <svg class="compass-needle-svg" viewBox="0 0 24 24" fill="none">
-          <polygon points="12,2 8,12 12,9" fill="#EF4444" />
-          <polygon points="12,2 16,12 12,9" fill="#DC2626" />
-          <polygon points="12,22 8,12 12,15" fill="#94A3B8" />
-          <polygon points="12,22 16,12 12,15" fill="#64748B" />
-          <circle cx="12" cy="12" r="2.2" fill="#FFFFFF" stroke="#0F172A" stroke-width="1.2" />
-        </svg>
-      </div>
-    </div>
-    <div id="fab-rotate-left" class="fab" title="Putar Kiri 15°" style="font-size: 16px; font-weight: bold; color: #07326E;">⟲</div>
-    <div id="fab-rotate-right" class="fab" title="Putar Kanan 15°" style="font-size: 16px; font-weight: bold; color: #07326E;">⟳</div>
-    <div id="fab-gps" class="fab active-tracking" title="Pusatkan & Ikuti Posisi Saya">🎯</div>
-    <div id="fab-layer" class="fab" title="Ganti Tampilan Google Maps">🗺️</div>
-  </div>
 
   <!-- Standalone Photo Viewer Modal Fallback -->
   <div id="standalone-photo-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(15,23,42,0.85); z-index:9999; flex-direction:column; justify-content:center; align-items:center; padding:16px; backdrop-filter:blur(4px);">
@@ -403,9 +446,11 @@ export function getMapHtml(initialCoords, customers = []) {
 
   <!-- Map Script -->
   <script>
-    let currentLat = ${initLat};
-    let currentLng = ${initLng};
-    let followUser = true; // Mode otomatis mengikuti pergerakan pengguna
+    let currentLat = ${startLat};
+    let currentLng = ${startLng};
+    let userGpsLat = ${initLat};
+    let userGpsLng = ${initLng};
+    let followUser = false; // Mode otomatis mengikuti pergerakan pengguna (non-aktif secara default agar peta fokus ke rute pelanggan)
     let hasInitializedRoute = false;
     let isMapZooming = false;
     let isUserTouching = false;
@@ -426,225 +471,82 @@ export function getMapHtml(initialCoords, customers = []) {
       );
     }
 
-    // 1. Guard L.Renderer._onRotate agar tidak memicu _onZoomEnd() mid-gesture saat 2 jari sedang aktif (pinch/zoom)
-    // Mencegah garis rute jalan berkedip, terpotong, atau loncat saat peta diputar atau dizoom dengan 2 jari
-    if (typeof L !== 'undefined' && L.Renderer && L.Renderer.prototype._onRotate) {
-      const origOnRotate = L.Renderer.prototype._onRotate;
-      L.Renderer.prototype._onRotate = function() {
-        if (!this._map || !this._map._rotate) return;
-        const isZoomingGesture = this._map._animatingZoom ||
-          (this._map.touchGestures && (this._map.touchGestures._zooming || this._map.touchGestures._gesture));
-        if (isZoomingGesture) {
-          this._rotateOrigin = this._map.getPixelOrigin();
-          return;
-        }
-        return origOnRotate.apply(this, arguments);
-      };
-    }
-
-    // 2. Patch L.Map.TouchGestures dengan algoritma Math.atan2 (360° mulus & bebas pembagian nol)
-    // serta deadzone rotasi 3° agar saat cubit zoom lurus tidak memicu rotasi tak disengaja
-    if (typeof L !== 'undefined' && L.Map && L.Map.TouchGestures) {
-      L.Map.TouchGestures.prototype._onTouchStart = function(t) {
-        const e = this._map;
-        if (!t.touches || t.touches.length !== 2 || e._animatingZoom || this._zooming || this._rotating || this._gesture) return;
-        const i = getTouchPoint(e, t.touches[0]);
-        const o = getTouchPoint(e, t.touches[1]);
-        const n = i.subtract(o);
-        const s = this.pitch && e._rotate && Math.abs(n.x) > Math.abs(n.y);
-        if (!s && !this.zoom && !this.rotate) return;
-
-        this._gesture = s ? 'pending' : 'pinch';
-        this._startP1 = i;
-        this._startP2 = o;
-        if (typeof e._stopPitchBearingAnimation === 'function') {
-          e._stopPitchBearingAnimation();
-        }
-        this._centerPoint = e.getSize()._divideBy(2);
-        this._startLatLng = e.containerPointToLatLng(this._centerPoint);
-
-        if (this.zoom) {
-          if (e.options.touchZoom !== 'center') {
-            this._pinchStartLatLng = e.containerPointToLatLng(i.add(o)._divideBy(2));
-          }
-          this._startDist = i.distanceTo(o);
-          this._startZoom = e.getZoom();
-          this._zooming = true;
-        } else {
-          this._zooming = false;
-        }
-
-        if (this.rotate) {
-          this._lastAngle = Math.atan2(n.y, n.x) * (180 / Math.PI);
-          this._accumulatedRotation = 0;
-          this._rotationActive = false;
-          this._rotating = true;
-        } else {
-          this._rotating = false;
-        }
-
-        this._moved = false;
-        e._stop();
-        L.DomEvent.on(document, 'touchmove', this._onTouchMove, this).on(document, 'touchend touchcancel', this._onTouchEnd, this);
-        L.DomEvent.preventDefault(t);
-      };
-
-      L.Map.TouchGestures.prototype._onTouchMove = function(t) {
-        if (!t.touches || t.touches.length !== 2 || !this._gesture) return;
-        const e = this._map;
-        const i = getTouchPoint(e, t.touches[0]);
-        const o = getTouchPoint(e, t.touches[1]);
-        const n = i.subtract(o);
-        const s = i.distanceTo(o) / this._startDist;
-        let r;
-
-        if (this._gesture === 'pending') {
-          const a = i.subtract(this._startP1);
-          const h = o.subtract(this._startP2);
-          if (Math.max(a.x * a.x + a.y * a.y, h.x * h.x + h.y * h.y) < 25) {
-            L.DomEvent.preventDefault(t);
+    // 1. Penanganan Renderer Transform agar Garis Rute Menyatu dengan Peta (Anti-Drift / Anti-Geser seperti Google Maps)
+    try {
+      if (typeof L !== 'undefined' && L.Renderer) {
+        const origUpdateTransform = L.Renderer.prototype._updateTransform;
+        L.Renderer.prototype._updateTransform = function(center, zoom) {
+          // Ketika peta dalam orientasi normal (menghadap Utara), gunakan proyeksi standar Leaflet yang 100% presisi sub-pixel
+          if (!this._map || !this._map._rotate || Math.abs(this._map._bearing || 0) < 0.05) {
+            const scale = this._map.getZoomScale(zoom, this._zoom);
+            const viewHalf = this._map.getSize().multiplyBy(0.5 + (this.options.padding || 0.1));
+            const currentCenterPoint = this._map.project(this._center, zoom);
+            const topLeftOffset = viewHalf.multiplyBy(-scale).add(currentCenterPoint)
+              .subtract(this._map._getNewPixelOrigin(center, zoom));
+            L.DomUtil.setTransform(this._container, topLeftOffset, scale);
             return;
           }
-          const isPitch = p => Math.abs(p.y) > Math.abs(p.x);
-          if (isPitch(a) && isPitch(h) && Math.sign(a.y) === Math.sign(h.y)) {
-            this._gesture = 'pitch';
-            this._lastPitchY = (this._startP1.y + this._startP2.y) / 2;
-            this._zooming = this._rotating = false;
-          } else {
-            this._gesture = 'pinch';
-          }
-        }
-
-        if (this._gesture === 'pitch') {
-          const a = (i.y + o.y) / 2;
-          if (typeof e._setPitchAndBearing === 'function') {
-            e._setPitchAndBearing(e.getPitch() - (a - this._lastPitchY) * 0.5, e.getBearing());
-          }
-          this._lastPitchY = a;
-          L.DomEvent.preventDefault(t);
-          return;
-        }
-
-        if (!(this._zooming || this._rotating)) return;
-
-        // ROTASI PETA 2 JARI: Mulus 360° dengan threshold deadzone 3°
-        if (this._rotating) {
-          const currentAngle = Math.atan2(n.y, n.x) * (180 / Math.PI);
-          let delta = currentAngle - this._lastAngle;
-          while (delta > 180) delta -= 360;
-          while (delta < -180) delta += 360;
-          this._lastAngle = currentAngle;
-          this._accumulatedRotation += delta;
-
-          if (!this._rotationActive) {
-            if (Math.abs(this._accumulatedRotation) >= 3.0) {
-              this._rotationActive = true;
-              e.fire('rotatestart');
-              e.setBearing(e.getBearing() + this._accumulatedRotation);
-            }
-          } else {
-            if (Math.abs(delta) > 0.05) {
-              e.setBearing(e.getBearing() + delta);
-            }
-          }
-        }
-
-        // ZOOM PINCH HALUS
-        if (this._zooming) {
-          this._zoom = e.getScaleZoom(s, this._startZoom);
-          if (!e.options.bounceAtZoomLimits && (this._zoom < e.getMinZoom() && s < 1 || this._zoom > e.getMaxZoom() && s > 1)) {
-            this._zoom = e._limitZoom(this._zoom);
-          }
-          if (e.options.touchZoom === 'center') {
-            if (this._center = this._startLatLng, s === 1) return;
-          } else {
-            r = i._add(o)._divideBy(2)._subtract(this._centerPoint);
-            if (s === 1 && r.x === 0 && r.y === 0) return;
-            const a = e._pitch
-              ? e.containerPointToLayerPoint(this._centerPoint.add(r)).subtract(e.containerPointToLayerPoint(this._centerPoint))
-              : r.rotate(-e.getBearing() * (Math.PI / 180));
-            this._center = e.unproject(e.project(this._pinchStartLatLng).subtract(a));
-          }
-        }
-
-        if (!this._moved) {
-          e._moveStart(true, false);
-          this._moved = true;
-        }
-        e._move.bind(e, this._center, this._zoom, { pinch: true, round: false }, void 0)();
-        if (this.zoom) {
-          if (e.options.zoomAnimation) {
-            e._animateZoomNoDelay(this._center, e._limitZoom(this._zoom));
-          } else {
-            e._resetView(this._center, e._limitZoom(this._zoom));
-          }
-        }
-        L.DomEvent.preventDefault(t);
-      };
-
-      L.Map.TouchGestures.prototype._onTouchEnd = function() {
-        const t = this._gesture;
-        delete this._gesture;
-        const wasRotating = this._rotationActive || this._rotating;
-        if (t === 'pitch' || t === 'pending' || !this._moved || !(this._zooming || this._rotating)) {
-          this._zooming = false;
-          this._rotating = false;
-          this._rotationActive = false;
-          L.DomEvent.off(document, 'touchmove', this._onTouchMove, this).off(document, 'touchend touchcancel', this._onTouchEnd, this);
-          if (wasRotating && this._map) this._map.fire('rotateend');
-          return;
-        }
-        this._zooming = false;
-        this._rotating = false;
-        this._rotationActive = false;
-        L.DomEvent.off(document, 'touchmove', this._onTouchMove, this).off(document, 'touchend touchcancel', this._onTouchEnd, this);
-        if (this.zoom) {
-          if (this._map.options.zoomAnimation) {
-            this._map._animateZoom(this._center, this._map._limitZoom(this._zoom), true, this._map.options.zoomSnap);
-          } else {
-            this._map._resetView(this._center, this._map._limitZoom(this._zoom));
-          }
-        }
-        if (wasRotating && this._map) this._map.fire('rotateend');
-      };
+          return origUpdateTransform.apply(this, arguments);
+        };
+      }
+    } catch (e) {
+      console.warn('Renderer transform patch error:', e);
     }
 
-    // Dedicated Canvas Renderer untuk polyline rute jalan agar mulus & sinkron tanpa loncat saat zoom
-    const routeCanvasRenderer = L.canvas({ padding: 0.5 });
-
     // 1. Inisialisasi Peta & Layer Google Maps dengan Dukungan Rotasi Peta Penuh & Zoom Ultra Halus
-    const map = L.map('map', {
+    const hasRotate = typeof L !== 'undefined' && typeof L.Map !== 'undefined' && typeof L.Map.prototype.setBearing === 'function';
+
+    const mapOptions = {
+      preferCanvas: true, // AKTIF: Satukan layer vektor rute ke dalam Canvas hardware-accelerated seperti Google Maps
       zoomControl: false,
       attributionControl: false,
-      rotate: true,
-      touchRotate: true, // AKTIF: Peta bisa diputar bebas dengan 2 jari
-      rotateControl: false,
-      bearing: 0,
-      preferCanvas: true, // Vektor digambar via Canvas GPU hardware-accelerated
-      zoomSnap: 0, // KUNCI: Nilai 0 menghilangkan efek 'loncat' / snapping ke integer zoom pada pinch-zoom
-      zoomDelta: 0.5, // Tombol zoom naik/turun lebih halus
-      wheelPxPerZoomLevel: 120, // Mousewheel / trackpad zoom halus
-      wheelDebounceTime: 40,
-      zoomAnimation: true,
+      zoomSnap: 0.5, // Snap halus per 0.5 level agar tile tajam tanpa efek reload
+      zoomDelta: 0.5, // Perubahan zoom naik/turun bertahap dan halus
+      wheelPxPerZoomLevel: 120,
+      wheelDebounceTime: 60,
+      zoomAnimation: true, // Animasi transisi zoom CSS mulus
       zoomAnimationThreshold: 8,
-      fadeAnimation: true,
-      markerZoomAnimation: true,
+      fadeAnimation: true, // Transisi gambar antar level zoom memudar mulus
+      markerZoomAnimation: true, // Marker skala mulus dengan hardware transform
       bounceAtZoomLimits: false, // Hindari efek membal kasar saat batas zoom tercapai
       touchZoom: true,
       tap: false,
-    }).setView([currentLat, currentLng], 16);
+    };
 
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    if (hasRotate) {
+      mapOptions.rotate = true;
+      mapOptions.touchRotate = true; // AKTIF: Peta bisa diputar bebas dengan 2 jari
+      mapOptions.rotateControl = false;
+      mapOptions.bearing = 0;
+    }
 
-    // Google Maps Tile Layers
-    const googleRoads = L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+    const map = L.map('map', mapOptions).setView([currentLat, currentLng], 15);
+
+    // Pastikan ukuran kontainer peta segera terdeteksi akurat saat WebView / iframe selesai dimuat
+    setTimeout(function() { if (map && typeof map.invalidateSize === 'function') map.invalidateSize(false); }, 100);
+    setTimeout(function() { if (map && typeof map.invalidateSize === 'function') map.invalidateSize(false); }, 300);
+    setTimeout(function() { if (map && typeof map.invalidateSize === 'function') map.invalidateSize(false); }, 700);
+    setTimeout(function() { if (map && typeof map.invalidateSize === 'function') map.invalidateSize(false); }, 1400);
+
+    // Opsi Tile Layer Anti-Reload saat Pinch/Zoom (Ultra Halus 60 FPS)
+    const tileOptions = {
       maxZoom: 20,
-      subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
-    });
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+      updateWhenZooming: false, // JANGAN reload atau hapus tile selama proses cubit/zoom (biarkan CSS transform bekerja)
+      updateWhenIdle: true,    // Hanya unduh tile baru setelah gerakan zoom berhenti
+      keepBuffer: 6,           // Simpan cache tile sekitar agar tidak muncul kotak putih kosong saat zoom
+    };
 
-    const googleHybrid = L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
-      maxZoom: 20,
-      subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+    const googleRoads = L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', tileOptions);
+
+    const googleHybrid = L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', tileOptions);
+
+    const osmFallback = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap',
+      updateWhenZooming: false,
+      updateWhenIdle: true,
+      keepBuffer: 6,
     });
 
     let currentLayer = 'roads';
@@ -666,29 +568,198 @@ export function getMapHtml(initialCoords, customers = []) {
       }
     }
 
-    document.getElementById('fab-layer').addEventListener('click', toggleLayer);
     document.getElementById('chip-layer').addEventListener('click', toggleLayer);
 
     // 2. Marker Radar GPS Saya & Variabel Rute
     let gpsRadarMarker = null;
     let gpsAccuracyCircle = null;
+    let isProgrammaticMove = false;
+
+    function createOrUpdateGpsMarker(lat, lng, accuracy, heading) {
+      if (typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) return;
+      currentLat = lat;
+      currentLng = lng;
+      userGpsLat = lat;
+      userGpsLng = lng;
+
+      const acc = (typeof accuracy === 'number' && accuracy > 0 && accuracy < 150) ? accuracy : 15;
+
+      if (!gpsRadarMarker) {
+        const gpsIcon = L.divIcon({
+          className: 'gps-ring-container',
+          html: '<div class="gps-marker-ring"><div class="gps-marker-core"></div></div>' +
+                '<div id="gps-heading-cone" class="gps-heading-cone">' +
+                  '<svg viewBox="0 0 16 16" width="16" height="16">' +
+                    '<polygon points="8,0 15,15 8,11 1,15" fill="#2563EB" />' +
+                  '</svg>' +
+                '</div>',
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
+        });
+        gpsRadarMarker = L.marker([lat, lng], { icon: gpsIcon, zIndexOffset: 2000 }).addTo(map);
+      } else {
+        gpsRadarMarker.setLatLng([lat, lng]);
+      }
+
+      if (!gpsAccuracyCircle) {
+        gpsAccuracyCircle = L.circle([lat, lng], {
+          radius: acc,
+          color: '#2563eb',
+          weight: 1.5,
+          fillColor: '#3b82f6',
+          fillOpacity: 0.08
+        }).addTo(map);
+      } else {
+        gpsAccuracyCircle.setLatLng([lat, lng]);
+        gpsAccuracyCircle.setRadius(acc);
+      }
+
+      if (typeof heading === 'number' && !isNaN(heading) && heading >= 0) {
+        applyHeadingUpdate(heading);
+      }
+    }
+
+    // Tampilkan posisi saya langsung di peta sejak awal jika koordinat tersedia
+    if (typeof userGpsLat === 'number' && typeof userGpsLng === 'number' && !isNaN(userGpsLat) && !isNaN(userGpsLng)) {
+      createOrUpdateGpsMarker(userGpsLat, userGpsLng, 15, null);
+    }
 
     // 3. Rute Titik Koordinat Real Pelanggan PDAM (Sesuai Rute Jalan Asli)
-    let initialCustomers = JSON.parse(${JSON.stringify(customersJson)});
+    let initialCustomers = ${JSON.stringify(sanitizedCustomers)};
+    if (!Array.isArray(initialCustomers)) initialCustomers = [];
     let customerMarkers = [];
+    let routeBgPolyline = null;
     let routePolyline = null;
     let lastRoadPoints = null;
     let isRouteVisible = true;
     let currentValidCustomers = [];
-    let hasFittedInitialBounds = false;
     let isFetchingRoute = false;
     let lastRouteOriginLat = null;
     let lastRouteOriginLng = null;
     let lastPanLat = null;
     let lastPanLng = null;
     let hasReceivedNativeGps = false;
-    let userGpsLat = currentLat;
-    let userGpsLng = currentLng;
+    let hasFittedInitialBounds = false;
+    let userHasInteractedWithMap = false;
+
+    // Helper Pusatkan Peta Membingkai Seluruh Titik Pelanggan & Posisi Saya
+    function fitMapToRoute(force = false) {
+      if (!map) return;
+      // Jika pengguna sudah pernah zoom atau geser peta secara manual, JANGAN PERNAH zoom out otomatis
+      // kecuali dipicu secara eksplisit (force === true, misalnya saat tombol chip rute ditekan)
+      if (!force && (hasFittedInitialBounds || userHasInteractedWithMap)) {
+        return;
+      }
+      hasFittedInitialBounds = true;
+
+      try {
+        if (typeof map.invalidateSize === 'function') map.invalidateSize(false);
+      } catch(e) {}
+
+      const points = [];
+      if (Array.isArray(currentValidCustomers) && currentValidCustomers.length > 0) {
+        currentValidCustomers.forEach(c => {
+          if (typeof c.lat === 'number' && typeof c.lng === 'number' && !isNaN(c.lat) && !isNaN(c.lng) && c.lat !== 0 && c.lng !== 0) {
+            points.push([c.lat, c.lng]);
+          }
+        });
+      }
+
+      if (points.length === 0) {
+        if (typeof userGpsLat === 'number' && typeof userGpsLng === 'number' && !isNaN(userGpsLat)) {
+          map.setView([userGpsLat, userGpsLng], 15);
+        }
+        return;
+      }
+
+      // Jika lokasi saya tersedia dan dalam radius wajar (< 50 km) dengan pelanggan pertama, sertakan posisi saya
+      if (typeof userGpsLat === 'number' && typeof userGpsLng === 'number' && !isNaN(userGpsLat) && userGpsLat !== 0) {
+        const dist = calculateDistanceMeters(userGpsLat, userGpsLng, points[0][0], points[0][1]);
+        if (dist <= 50000) {
+          points.push([userGpsLat, userGpsLng]);
+        }
+      }
+
+      try {
+        const bounds = L.latLngBounds(points);
+        if (bounds && bounds.isValid()) {
+          isProgrammaticMove = true;
+          map.fitBounds(bounds, { padding: [55, 55], maxZoom: 16 });
+          setTimeout(function() { isProgrammaticMove = false; }, 900);
+        }
+      } catch(e) {
+        console.warn('Gagal fitBounds:', e);
+      }
+    }
+
+    window.fitMapToRoute = fitMapToRoute;
+
+    function scheduleFitRoute() {
+      setTimeout(function() {
+        if (!userHasInteractedWithMap && !hasFittedInitialBounds) {
+          if (map && typeof map.invalidateSize === 'function') map.invalidateSize(false);
+          fitMapToRoute(false);
+        }
+      }, 100);
+      setTimeout(function() {
+        if (!userHasInteractedWithMap && !hasFittedInitialBounds) {
+          if (map && typeof map.invalidateSize === 'function') map.invalidateSize(false);
+          fitMapToRoute(false);
+        }
+      }, 350);
+      setTimeout(function() {
+        if (!userHasInteractedWithMap && !hasFittedInitialBounds) {
+          if (map && typeof map.invalidateSize === 'function') map.invalidateSize(false);
+          fitMapToRoute(false);
+        }
+      }, 800);
+    }
+
+    // Satu Layer Canvas untuk Garis Rute (Terkunci Menjadi Satu Kesatuan dengan Peta seperti Google Maps)
+    const routeCanvasRenderer = L.canvas({ padding: 0.5 });
+
+    // Helper Menggambar & Memperbarui Garis Rute (Kontras Tinggi & Mulus)
+    function updateRouteDisplay(points) {
+      if (!Array.isArray(points) || points.length < 2 || !isRouteVisible) {
+        if (routeBgPolyline) { map.removeLayer(routeBgPolyline); routeBgPolyline = null; }
+        if (routePolyline) { map.removeLayer(routePolyline); routePolyline = null; }
+        return;
+      }
+      lastRoadPoints = points;
+
+      // 1. Lapisan Border Putih Luar agar garis selalu kontras terlihat di atas peta satelit maupun peta jalan
+      if (!routeBgPolyline) {
+        routeBgPolyline = L.polyline(points, {
+          renderer: routeCanvasRenderer,
+          color: '#FFFFFF',
+          weight: 9,
+          opacity: 0.95,
+          lineJoin: 'round',
+          lineCap: 'round',
+          interactive: false,
+        }).addTo(map);
+      } else {
+        if (!map.hasLayer(routeBgPolyline)) routeBgPolyline.addTo(map);
+        routeBgPolyline.setLatLngs(points);
+      }
+
+      // 2. Lapisan Inti Garis Biru PDAM (Satu Layer dengan Border Putih & Tile Peta)
+      if (!routePolyline) {
+        routePolyline = L.polyline(points, {
+          renderer: routeCanvasRenderer,
+          color: '#0284c7',
+          weight: 5.5,
+          opacity: 0.96,
+          lineJoin: 'round',
+          lineCap: 'round',
+          smoothFactor: 1.2,
+          interactive: false,
+        }).addTo(map);
+      } else {
+        if (!map.hasLayer(routePolyline)) routePolyline.addTo(map);
+        routePolyline.setLatLngs(points);
+      }
+    }
 
     // Perhitungan jarak meter antara dua koordinat (Haversine)
     function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
@@ -707,27 +778,67 @@ export function getMapHtml(initialCoords, customers = []) {
     function fetchAndDrawRoadRoute(originLat, originLng, custList, shouldFitBounds = false) {
       if (!isRouteVisible) return;
       if (!Array.isArray(custList) || custList.length === 0) return;
-      if (typeof originLat !== 'number' || typeof originLng !== 'number') return;
 
       const validTargets = custList.filter(
-        c => typeof c.lat === 'number' && typeof c.lng === 'number' && !isNaN(c.lat) && !isNaN(c.lng)
+        c => typeof c.lat === 'number' && typeof c.lng === 'number' && !isNaN(c.lat) && !isNaN(c.lng) && c.lat !== 0 && c.lng !== 0
       );
       if (validTargets.length === 0) return;
 
+      // Tentukan titik awal rute:
+      // Mulai rute dari Lokasi Saya (posisi GPS) -> seluruh pelanggan pada daftar tagihan
+      let routePoints = [];
+      const originLatToUse = (typeof userGpsLat === 'number' && userGpsLat !== 0) ? userGpsLat : originLat;
+      const originLngToUse = (typeof userGpsLng === 'number' && userGpsLng !== 0) ? userGpsLng : originLng;
+
+      let distFromUserToFirst = 999999;
+      if (typeof originLatToUse === 'number' && typeof originLngToUse === 'number' && validTargets.length > 0) {
+        distFromUserToFirst = calculateDistanceMeters(originLatToUse, originLngToUse, validTargets[0].lat, validTargets[0].lng);
+      }
+
+      if (typeof originLatToUse === 'number' && typeof originLngToUse === 'number' && originLatToUse !== 0 && distFromUserToFirst <= 50000) {
+        // Jika lokasi saya tersedia dan dalam radius wajar (<= 50 km), hubungkan posisi saya ke seluruh pelanggan
+        routePoints = [[originLatToUse, originLngToUse], ...validTargets.map(c => [c.lat, c.lng])];
+      } else {
+        // Jika posisi saya belum siap atau jauh (> 50 km), hubungkan antar pelanggan rute
+        routePoints = validTargets.map(c => [c.lat, c.lng]);
+        if (routePoints.length === 1 && typeof originLatToUse === 'number' && typeof originLngToUse === 'number') {
+          // Khusus jika hanya 1 pelanggan, hubungkan ke posisi saya
+          routePoints = [[originLatToUse, originLngToUse], [validTargets[0].lat, validTargets[0].lng]];
+        }
+      }
+
+      // 1. Gambar rute penghubung langsung terlebih dahulu (instan SVG) agar rute PASTI langsung tampil tanpa jeda
+      if (routePoints.length >= 2) {
+        updateRouteDisplay(routePoints);
+      }
+
+      if (shouldFitBounds && !userHasInteractedWithMap && !hasFittedInitialBounds) {
+        fitMapToRoute(false);
+      }
+
       const chip = document.getElementById('chip-rute');
       if (chip && isRouteVisible) {
-        chip.innerText = '⏳ Membaca Rute Jalan...';
+        chip.innerText = '🛣️ Rute Jalan (' + validTargets.length + ' Pelanggan)';
       }
+
+      if (routePoints.length < 2) return;
 
       isFetchingRoute = true;
 
-      // Susun titik waypoints rute jalan mulai dari Lokasi Saya (origin) -> pelanggan
-      // Format OSRM: lng,lat;lng,lat...
-      const waypoints = [
-        originLng.toFixed(6) + ',' + originLat.toFixed(6),
-        ...validTargets.map(c => c.lng.toFixed(6) + ',' + c.lat.toFixed(6))
-      ].join(';');
+      // 2. Ambil rute jalan riil dari OSRM (batasi maksimal 12 titik waypoints per panggilan agar respon instan & anti-timeout)
+      const chunkWaypoints = routePoints.slice(0, 12);
+      let canQueryOsrm = true;
+      for (let i = 0; i < chunkWaypoints.length - 1; i++) {
+        const d = calculateDistanceMeters(chunkWaypoints[i][0], chunkWaypoints[i][1], chunkWaypoints[i+1][0], chunkWaypoints[i+1][1]);
+        if (d > 40000) { canQueryOsrm = false; break; }
+      }
 
+      if (!canQueryOsrm) {
+        isFetchingRoute = false;
+        return;
+      }
+
+      const waypoints = chunkWaypoints.map(pt => pt[1].toFixed(6) + ',' + pt[0].toFixed(6)).join(';');
       const osrmUrl = 'https://router.project-osrm.org/route/v1/driving/' + waypoints + '?overview=full&geometries=geojson';
 
       fetch(osrmUrl)
@@ -737,28 +848,7 @@ export function getMapHtml(initialCoords, customers = []) {
           if (data && data.code === 'Ok' && data.routes && data.routes[0]) {
             const route = data.routes[0];
             const roadPoints = route.geometry.coordinates.map(pt => [pt[1], pt[0]]);
-            lastRoadPoints = roadPoints;
-
-            // Gambar atau perbarui rute jalan raya dengan Canvas Renderer berkecepatan tinggi
-            if (routePolyline) {
-              if (!map.hasLayer(routePolyline)) {
-                routePolyline.addTo(map);
-              }
-              routePolyline.setLatLngs(roadPoints);
-              if (typeof routePolyline.redraw === 'function') {
-                routePolyline.redraw();
-              }
-            } else {
-              routePolyline = L.polyline(roadPoints, {
-                color: '#0284c7',
-                weight: 5,
-                opacity: 0.88,
-                lineJoin: 'round',
-                lineCap: 'round',
-                smoothFactor: 1.5,
-                renderer: routeCanvasRenderer
-              }).addTo(map);
-            }
+            updateRouteDisplay(roadPoints);
 
             const distMeters = route.distance;
             const distFormatted = distMeters < 1000
@@ -769,22 +859,11 @@ export function getMapHtml(initialCoords, customers = []) {
               chip.innerText = '🛣️ Rute Jalan: ' + distFormatted;
               chip.classList.add('active');
             }
-
-            // HANYA sesuaikan batas kamera (fitBounds) jika secara eksplisit diminta (misal: saat pertama kali buka atau klik tombol rute)
-            // JANGAN PERNAH panggil fitBounds pada pergerakan GPS berkala atau saat sedang zoom agar peta tidak loncat-loncat!
-            if (shouldFitBounds && roadPoints.length > 0 && !isMapZooming && !isUserTouching) {
-              const allBounds = L.latLngBounds(roadPoints);
-              allBounds.extend([originLat, originLng]);
-              map.fitBounds(allBounds, { padding: [50, 50], maxZoom: 16 });
-            }
-          } else {
-            if (chip) chip.innerText = '🛣️ Rute Jalan (' + validTargets.length + ' Pelanggan)';
           }
         })
         .catch(err => {
           isFetchingRoute = false;
-          console.warn('Gagal membaca rute jalan OSRM:', err);
-          if (chip) chip.innerText = '🛣️ Rute Jalan (' + validTargets.length + ' Pelanggan)';
+          console.warn('Gagal membaca rute jalan OSRM (menggunakan garis rute langsung):', err);
         });
     }
 
@@ -847,34 +926,77 @@ export function getMapHtml(initialCoords, customers = []) {
       };
     }
 
-    function renderRealCustomerMarkers(rawList) {
+    function renderRealCustomerMarkers(rawList, isInitial = false) {
       customerMarkers.forEach(m => map.removeLayer(m));
       customerMarkers = [];
-      // JANGAN hapus routePolyline di sini agar rute tidak hilang/berkedip saat data diperbarui
 
       if (!Array.isArray(rawList)) return;
 
-      const validList = rawList.map(c => {
+      const parseVal = (v) => {
+        if (v === null || v === undefined) return null;
+        if (typeof v === 'number') return (!isNaN(v) && isFinite(v) && v !== 0) ? v : null;
+        if (typeof v === 'string') {
+          const s = v.trim().replace(',', '.');
+          if (!s || s === '-' || s === '0' || s.toLowerCase() === 'null' || s.toLowerCase() === 'nan') return null;
+          const num = parseFloat(s);
+          return (!isNaN(num) && isFinite(num) && num !== 0) ? num : null;
+        }
+        return null;
+      };
+
+      const sanitizeLatLng = (rawLat, rawLng) => {
+        if (rawLat === null || rawLng === null) return null;
+        let lat = rawLat;
+        let lng = rawLng;
+        if (lat > 50 && lng < 20) {
+          const temp = lat;
+          lat = lng;
+          lng = temp;
+        }
+        if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && (lat !== 0 || lng !== 0)) {
+          return { lat, lng };
+        }
+        return null;
+      };
+
+      const validList = rawList.map((c) => {
         if (!c) return null;
         let lat = null;
         let lng = null;
-        if (typeof c.lat === 'number' && typeof c.lng === 'number' && !isNaN(c.lat) && !isNaN(c.lng)) {
-          lat = c.lat;
-          lng = c.lng;
-        } else if (typeof c.latitude === 'number' && typeof c.longitude === 'number' && !isNaN(c.latitude) && !isNaN(c.longitude)) {
-          lat = c.latitude;
-          lng = c.longitude;
+
+        const directLat = parseVal(c.lat !== undefined ? c.lat : c.latitude);
+        const directLng = parseVal(c.lng !== undefined ? c.lng : c.longitude);
+        const directRes = sanitizeLatLng(directLat, directLng);
+        if (directRes) {
+          lat = directRes.lat;
+          lng = directRes.lng;
         } else if (c.koordinat && typeof c.koordinat === 'string') {
-          const cleanStr = c.koordinat.replace(/[()]/g, '');
-          const parts = cleanStr.split(',').map(s => parseFloat(s.trim()));
-          if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-            lat = parts[0];
-            lng = parts[1];
+          const cleanStr = c.koordinat.replace(/[()]/g, '').trim();
+          if (cleanStr && cleanStr !== '-' && cleanStr !== '0' && cleanStr !== '0,0' && cleanStr !== '0, 0') {
+            const parts = cleanStr.includes(';') ? cleanStr.split(';') : cleanStr.split(',');
+            if (parts.length >= 2) {
+              const strRes = sanitizeLatLng(parseVal(parts[0]), parseVal(parts[1]));
+              if (strRes) {
+                lat = strRes.lat;
+                lng = strRes.lng;
+              }
+            }
+          }
+        } else if (c._coords && typeof c._coords === 'object') {
+          const coordsRes = sanitizeLatLng(
+            parseVal(c._coords.lat !== undefined ? c._coords.lat : c._coords.latitude),
+            parseVal(c._coords.lng !== undefined ? c._coords.lng : c._coords.longitude)
+          );
+          if (coordsRes) {
+            lat = coordsRes.lat;
+            lng = coordsRes.lng;
           }
         }
+
         if (lat === null || lng === null) return null;
+
         return {
-          id: c.id || c.tagihanId || '',
+          id: String(c.id || c.tagihanId || Math.random()),
           nama: c.nama || c.name || 'Pelanggan',
           noSmb: c.noSmb || c.smb || c.nomorSmb || c.no_smb || c.nosmb || '',
           fotoPersil: c.fotoPersil || null,
@@ -885,22 +1007,69 @@ export function getMapHtml(initialCoords, customers = []) {
 
       currentValidCustomers = validList;
 
-      validList.forEach((cust) => {
-        // Tampilkan nomor SMB pelanggan pada maps rute tagihan sesuai instruksi
-        const customerSmb = cust.noSmb || cust.nama || 'Pelanggan';
+      // Anti-tertumpuk: Deteksi koordinat pelanggan yang saling berdekatan / identik (jarak <= 12 meter)
+      // dan berikan offset alami mikro (~8 meter) agar pin & label nomor SMB tidak saling menutupi
+      const threshold = 0.00012; // ~12 meter
+      const offsetDistance = 0.000075; // ~8 meter
+      const assigned = new Set();
+
+      for (let i = 0; i < validList.length; i++) {
+        if (assigned.has(i)) continue;
+        const group = [i];
+        assigned.add(i);
+
+        for (let j = i + 1; j < validList.length; j++) {
+          if (assigned.has(j)) continue;
+          const dLat = Math.abs(validList[i].lat - validList[j].lat);
+          const dLng = Math.abs(validList[i].lng - validList[j].lng);
+          if (dLat < threshold && dLng < threshold) {
+            group.push(j);
+            assigned.add(j);
+          }
+        }
+
+        if (group.length > 1) {
+          const count = group.length;
+          group.forEach((itemIdx, k) => {
+            let angle;
+            if (count === 2) {
+              angle = k === 0 ? Math.PI : 0; // Kiri dan kanan berdampingan
+            } else {
+              angle = (2 * Math.PI * k) / count - Math.PI / 2;
+            }
+
+            const latOffset = offsetDistance * Math.sin(angle);
+            const lngOffset = offsetDistance * Math.cos(angle) / Math.cos(validList[itemIdx].lat * Math.PI / 180);
+
+            validList[itemIdx].lat += latOffset;
+            validList[itemIdx].lng += lngOffset;
+          });
+        }
+      }
+
+      validList.forEach((cust, idx) => {
+        // Tampilkan hanya nomor SMB pelanggan pada pin maps rute tagihan (tanpa kata 'SMB')
+        const smbRaw = (cust.noSmb || '').trim();
+        const cleanSmb = smbRaw.replace(/^SMB[-:\\s_]*/i, '').trim();
+        const displaySmb = cleanSmb || smbRaw || cust.nama || ('Pelanggan ' + (idx + 1));
 
         // Pin Marker Pelanggan PDAM Sesuai Koordinat Asli
-        const customerPinIcon = L.icon({
-          iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
-          shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-          iconSize: [25, 41],
-          iconAnchor: [12, 41],
-          popupAnchor: [1, -34],
-          tooltipAnchor: [1, -34],
-          shadowSize: [41, 41]
+        const customerPinSvg = '<svg width="28" height="42" viewBox="0 0 26 40" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+          '<path d="M13 0C5.82 0 0 5.82 0 13C0 22.75 13 40 13 40C13 40 26 22.75 26 13C26 5.82 20.18 0 13 0Z" fill="#0284C7"/>' +
+          '<path d="M13 1C6.37 1 1 6.37 1 13C1 22.1 12.5 38.3 13 39C13.5 38.3 25 22.1 25 13C25 6.37 19.63 1 13 1Z" stroke="#FFFFFF" stroke-width="1.2"/>' +
+          '<circle cx="13" cy="13" r="5" fill="#FFFFFF"/>' +
+          '</svg>';
+
+        const customerPinIcon = L.divIcon({
+          className: 'custom-customer-pin',
+          html: '<div style="filter: drop-shadow(0 3px 6px rgba(0,0,0,0.35)); width: 28px; height: 42px;">' + customerPinSvg + '</div>',
+          iconSize: [28, 42],
+          iconAnchor: [14, 42],
+          popupAnchor: [0, -42],
+          tooltipAnchor: [0, -42]
         });
 
-        const m = L.marker([cust.lat, cust.lng], { icon: customerPinIcon }).addTo(map);
+        const m = L.marker([cust.lat, cust.lng], { icon: customerPinIcon, zIndexOffset: 1000 + idx }).addTo(map);
         m._cust = cust;
         cust._marker = m;
 
@@ -908,13 +1077,11 @@ export function getMapHtml(initialCoords, customers = []) {
           if (!m.isPopupOpen()) {
             m.openPopup();
           }
-          // Tampilkan foto persil sesuai nomor SMB yang diklik
-          // PENTING: JANGAN ubah koordinat GPS & JANGAN timpa rute tagihan pelanggan yang sedang tampil!
           triggerShowFotoPersil(cust);
         };
 
-        // Hanya cantumkan nomor SMB pelanggan saja sesuai instruksi (interaktif untuk klik foto persil)
-        m.bindTooltip(customerSmb, {
+        // Cantumkan nomor SMB pelanggan pada tooltip permanen
+        m.bindTooltip(displaySmb, {
           permanent: true,
           direction: 'top',
           className: 'customer-name-tooltip',
@@ -924,8 +1091,10 @@ export function getMapHtml(initialCoords, customers = []) {
 
         // Popup saat marker diklik menampilkan nomor SMB pelanggan & aksi lihat foto
         const popupEl = document.createElement('div');
-        popupEl.style.cssText = 'font-size:13px; font-weight:700; color:#07326E; text-align:center; padding:3px 6px; cursor:pointer;';
-        popupEl.innerHTML = '<div>' + customerSmb + '</div><div style="font-size:11px; color:#0284C7; margin-top:2px; font-weight:600;">📷 Lihat Foto Persil</div>';
+        popupEl.style.cssText = 'font-size:13px; color:#07326E; text-align:center; padding:4px 8px; cursor:pointer; min-width:130px;';
+        popupEl.innerHTML = '<div style="font-weight:800; font-size:13px; color:#07326E;">' + displaySmb + '</div>' +
+          '<div style="font-size:11px; color:#64748B; margin:2px 0;">' + (cust.nama || '') + '</div>' +
+          '<div style="font-size:11px; color:#0284C7; margin-top:4px; font-weight:700; background:#E0F2FE; padding:3px 6px; border-radius:6px;">📷 Lihat Foto Persil</div>';
         popupEl.onclick = handleSmbAction;
         m.bindPopup(popupEl);
 
@@ -950,33 +1119,46 @@ export function getMapHtml(initialCoords, customers = []) {
         customerMarkers.push(m);
       });
 
-      // Baca & gambar rute jalan asli dari lokasi saya ke pelanggan
+      // Hubungkan rute dan pusatkan peta ke seluruh pelanggan (hanya saat pemuatan awal & belum ada interaksi manual pengguna)
       if (validList.length > 0) {
-        const fitFirstTime = !hasFittedInitialBounds;
-        if (fitFirstTime) hasFittedInitialBounds = true;
-        fetchAndDrawRoadRoute(currentLat, currentLng, validList, fitFirstTime);
+        const shouldFit = isInitial && !userHasInteractedWithMap && !hasFittedInitialBounds;
+        fetchAndDrawRoadRoute(currentLat, currentLng, validList, shouldFit);
+        if (shouldFit) {
+          fitMapToRoute(false);
+        }
       } else {
+        if (routeBgPolyline) {
+          map.removeLayer(routeBgPolyline);
+          routeBgPolyline = null;
+        }
+        if (routePolyline) {
+          map.removeLayer(routePolyline);
+          routePolyline = null;
+        }
         const chip = document.getElementById('chip-rute');
         if (chip) chip.innerText = '🛣️ Rute Jalan (0 Pelanggan)';
+      }
+
+      if (isInitial && !userHasInteractedWithMap && !hasFittedInitialBounds) {
+        scheduleFitRoute();
       }
     }
 
     function toggleRoute() {
-      isRouteVisible = !isRouteVisible;
-      const chip = document.getElementById('chip-rute');
       if (isRouteVisible) {
+        // Jika rute sudah aktif, klik chip-rute akan memusatkan kembali peta ke seluruh rute (Fit to Route)
+        userHasInteractedWithMap = false;
+        fitMapToRoute(true);
+      } else {
+        isRouteVisible = true;
         customerMarkers.forEach(m => map.addLayer(m));
         if (currentValidCustomers.length > 0) {
-          fetchAndDrawRoadRoute(currentLat, currentLng, currentValidCustomers, true);
+          fetchAndDrawRoadRoute(currentLat, currentLng, currentValidCustomers, false);
         }
+        const chip = document.getElementById('chip-rute');
         if (chip) chip.classList.add('active');
-      } else {
-        customerMarkers.forEach(m => map.removeLayer(m));
-        if (routePolyline) map.removeLayer(routePolyline);
-        if (chip) {
-          chip.classList.remove('active');
-          chip.innerText = '🛣️ Tampilkan Rute Jalan';
-        }
+        userHasInteractedWithMap = false;
+        fitMapToRoute(true);
       }
     }
 
@@ -990,7 +1172,7 @@ export function getMapHtml(initialCoords, customers = []) {
 
     // 5. Menerima Koordinat Real-Time dari Native / Host App (Ultra Smooth)
     window.handleLocationUpdate = function(lat, lng, accuracy, heading) {
-      if (typeof lat !== 'number' || typeof lng !== 'number') return;
+      if (typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) return;
       hasReceivedNativeGps = true;
 
       userGpsLat = lat;
@@ -1004,80 +1186,67 @@ export function getMapHtml(initialCoords, customers = []) {
         return;
       }
 
-      // Update heading jika dikirimkan bersama lokasi
-      if (typeof heading === 'number' && !isNaN(heading) && heading >= 0) {
-        applyHeadingUpdate(heading);
-      }
+      // 1. Tampilkan dan perbarui marker posisi saya secara real-time
+      createOrUpdateGpsMarker(lat, lng, accuracy, heading);
 
-      // 1. Update radar marker posisi saya
-      if (!gpsRadarMarker) {
-        const gpsIcon = L.divIcon({
-          className: 'gps-ring-container',
-          html: '<div class="gps-marker-ring"><div class="gps-marker-core"></div></div>' +
-                '<div id="gps-heading-cone" class="gps-heading-cone">' +
-                  '<svg viewBox="0 0 14 14" width="14" height="14">' +
-                    '<polygon points="7,0 13,13 7,9 1,13" fill="#2563EB" />' +
-                  '</svg>' +
-                '</div>',
-          iconSize: [28, 28],
-          iconAnchor: [14, 14]
-        });
-        gpsRadarMarker = L.marker([lat, lng], { icon: gpsIcon, zIndexOffset: 1000 }).addTo(map);
-      } else {
-        gpsRadarMarker.setLatLng([lat, lng]);
-      }
-
-      // 2. Update lingkaran akurasi GPS jika akurasi wajar (< 100m)
-      if (typeof accuracy === 'number' && accuracy > 0 && accuracy < 100) {
-        if (!gpsAccuracyCircle) {
-          gpsAccuracyCircle = L.circle([lat, lng], {
-            radius: accuracy,
-            color: '#2563eb',
-            weight: 1.5,
-            fillColor: '#3b82f6',
-            fillOpacity: 0.08
-          }).addTo(map);
-        } else {
-          gpsAccuracyCircle.setLatLng([lat, lng]);
-          gpsAccuracyCircle.setRadius(accuracy);
-        }
-      }
-
-      // 3. Smooth Camera Follow: hanya geser kamera jika followUser aktif dan pengguna berpindah minimal 5 meter
-      // Mencegah jitter/getaran sensor GPS saat diam di tempat, dan JANGAN gerakkan saat sedang zoom/interaksi
+      // 2. Smooth Camera Follow: Kamera peta otomatis bergerak mengikuti posisi saya saat berjalan secara real-time
       if (followUser && !isMapZooming && !isUserTouching && !(map && map._animatingZoom)) {
         let distFromLastPan = 999;
         if (lastPanLat !== null && lastPanLng !== null) {
           distFromLastPan = calculateDistanceMeters(lastPanLat, lastPanLng, lat, lng);
         }
-        if (distFromLastPan >= 5) {
+        // Ambang batas 1.5 meter: cukup sensitif untuk langkah kaki orang berjalan, sekaligus mencegah getaran micro-jitter
+        if (distFromLastPan >= 1.5) {
           lastPanLat = lat;
           lastPanLng = lng;
-          map.panTo([lat, lng], { animate: true, duration: 0.8, easeLinearity: 0.25 });
+          map.panTo([lat, lng], { animate: true, duration: 0.6, easeLinearity: 0.25 });
         }
       }
 
-      // 4. Update rute jalan asli hanya jika jarak berpindah minimal 25 meter dari rute sebelumnya
+      // 3. Update rute jalan dari posisi saya ke pelanggan berikutnya secara real-time
       if (currentValidCustomers && currentValidCustomers.length > 0 && isRouteVisible && !isFetchingRoute && !isMapZooming && !isUserTouching) {
         let distFromLastRoute = 999;
         if (lastRouteOriginLat !== null && lastRouteOriginLng !== null) {
           distFromLastRoute = calculateDistanceMeters(lastRouteOriginLat, lastRouteOriginLng, lat, lng);
         }
-        if (distFromLastRoute >= 25) {
+        if (distFromLastRoute >= 15 || !routePolyline) {
           lastRouteOriginLat = lat;
           lastRouteOriginLng = lng;
           fetchAndDrawRoadRoute(lat, lng, currentValidCustomers, false);
+        } else if (lastRoadPoints && lastRoadPoints.length > 0 && !userHasInteractedWithMap) {
+          // Hubungkan titik awal garis rute polyline langsung ke posisi saya HANYA jika pengguna belum zoom/geser manual
+          const updatedPoints = [[lat, lng], ...lastRoadPoints.slice(1)];
+          updateRouteDisplay(updatedPoints);
         }
       }
     };
 
     // Update data pelanggan secara dinamis dari native/web
+    let lastCustFingerprint = '';
     window.updateCustomersData = function(data) {
       let parsed = data;
-      if (typeof data === 'string') {
-        try { parsed = JSON.parse(data); } catch(e) {}
+      while (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); } catch(e) { break; }
       }
-      renderRealCustomerMarkers(parsed);
+      if (!Array.isArray(parsed)) return;
+
+      const newFingerprint = parsed.map(c => {
+        if (!c) return '';
+        const id = c.id || c.tagihanId || c.noSmb || '';
+        const lat = c.lat !== undefined ? c.lat : c.latitude;
+        const lng = c.lng !== undefined ? c.lng : c.longitude;
+        const foto = c.fotoPersil ? '1' : '0';
+        return id + ':' + lat + ':' + lng + ':' + foto;
+      }).join('|');
+
+      if (newFingerprint && newFingerprint === lastCustFingerprint) {
+        // Data pelanggan sama persis, jangan render ulang marker atau ubah posisi kamera
+        return;
+      }
+      lastCustFingerprint = newFingerprint;
+
+      // Render marker baru tanpa mereset zoom kamera jika pengguna sedang berinteraksi/zoom
+      renderRealCustomerMarkers(parsed, false);
     };
 
     // 5b. Logika Rotasi Peta & Arah Hadap (Heading-Up & Free Rotation)
@@ -1115,13 +1284,9 @@ export function getMapHtml(initialCoords, customers = []) {
       applyHeadingUpdate(heading);
     };
 
-    // Update jarum kompas & cone marker setiap kali peta berputar (baik oleh sentuhan 2 jari maupun otomatis)
+    // Update cone marker arah hadap GPS setiap kali peta berputar
     map.on('rotate', function() {
       const bearing = map.getBearing ? map.getBearing() : 0;
-      const needle = document.getElementById('compass-icon-wrapper');
-      if (needle) {
-        needle.style.transform = 'rotate(' + (-bearing) + 'deg)';
-      }
       const cone = document.getElementById('gps-heading-cone');
       if (cone && !isHeadingFollowActive && currentHeading !== null) {
         cone.style.transform = 'rotate(' + (currentHeading - bearing) + 'deg)';
@@ -1140,7 +1305,7 @@ export function getMapHtml(initialCoords, customers = []) {
       }
     });
 
-    // Reset ke arah Utara saat tombol kompas diklik
+    // Reset ke arah Utara
     function resetNorth() {
       isHeadingFollowActive = false;
       const chipHeading = document.getElementById('chip-heading');
@@ -1152,32 +1317,6 @@ export function getMapHtml(initialCoords, customers = []) {
         map.setBearing(0);
       }
     }
-    document.getElementById('fab-compass').addEventListener('click', resetNorth);
-
-    // Tombol Putar Cepat Kiri & Kanan (15 derajat)
-    document.getElementById('fab-rotate-left').addEventListener('click', function() {
-      isHeadingFollowActive = false;
-      const chipHeading = document.getElementById('chip-heading');
-      if (chipHeading) {
-        chipHeading.classList.remove('following');
-        chipHeading.innerText = '🧭 Sesuai Arah';
-      }
-      if (map.setBearing && map.getBearing) {
-        map.setBearing(map.getBearing() - 15);
-      }
-    });
-
-    document.getElementById('fab-rotate-right').addEventListener('click', function() {
-      isHeadingFollowActive = false;
-      const chipHeading = document.getElementById('chip-heading');
-      if (chipHeading) {
-        chipHeading.classList.remove('following');
-        chipHeading.innerText = '🧭 Sesuai Arah';
-      }
-      if (map.setBearing && map.getBearing) {
-        map.setBearing(map.getBearing() + 15);
-      }
-    });
 
     // Toggle Mode "Sesuai Arah"
     function toggleHeadingFollow() {
@@ -1260,87 +1399,110 @@ export function getMapHtml(initialCoords, customers = []) {
 
     // 7. Toggle Mode "Ikuti Posisi Saya"
     function toggleFollowUser() {
-      followUser = true;
-      lastPanLat = currentLat;
-      lastPanLng = currentLng;
-      const chipFollow = document.getElementById('chip-follow');
-      if (chipFollow) {
-        chipFollow.classList.add('following');
-        chipFollow.innerText = '🎯 Ikuti Posisi Saya (Aktif)';
+      if (!followUser) {
+        followUser = true;
+        lastPanLat = currentLat;
+        lastPanLng = currentLng;
+        const chipFollow = document.getElementById('chip-follow');
+        if (chipFollow) {
+          chipFollow.classList.add('following');
+          chipFollow.innerText = '🎯 Ikuti Posisi Saya (Aktif)';
+        }
+        isProgrammaticMove = true;
+        map.flyTo([currentLat, currentLng], 17, { duration: 0.8 });
+        setTimeout(function() { isProgrammaticMove = false; }, 900);
+      } else {
+        followUser = false;
+        const chipFollow = document.getElementById('chip-follow');
+        if (chipFollow) {
+          chipFollow.classList.remove('following');
+          chipFollow.innerText = '🎯 Ikuti Posisi Saya';
+        }
       }
-      const fabGps = document.getElementById('fab-gps');
-      if (fabGps) fabGps.classList.add('active-tracking');
-
-      map.flyTo([currentLat, currentLng], 17, { duration: 1.0 });
     }
 
     document.getElementById('chip-follow').addEventListener('click', toggleFollowUser);
-    document.getElementById('fab-gps').addEventListener('click', toggleFollowUser);
 
     function disableFollowUser() {
+      if (isProgrammaticMove) return;
       if (!followUser) return;
       followUser = false;
       const chipFollow = document.getElementById('chip-follow');
       if (chipFollow) {
         chipFollow.classList.remove('following');
-        chipFollow.innerText = '🎯 Pusatkan ke Saya';
+        chipFollow.innerText = '🎯 Ikuti Posisi Saya';
       }
-      const fabGps = document.getElementById('fab-gps');
-      if (fabGps) fabGps.classList.remove('active-tracking');
     }
 
-    // Jika pengguna menggeser atau zoom peta secara manual, nonaktifkan auto-follow sementara
-    map.on('dragstart', disableFollowUser);
+    // Jika pengguna menggeser atau zoom peta secara manual, tandai interaksi & nonaktifkan auto-follow
+    map.on('dragstart', function() {
+      if (!isProgrammaticMove) {
+        userHasInteractedWithMap = true;
+        disableFollowUser();
+      }
+    });
     map.on('zoomstart', function() {
       isMapZooming = true;
-      disableFollowUser();
+      if (!isProgrammaticMove) {
+        userHasInteractedWithMap = true;
+        disableFollowUser();
+      }
     });
     map.on('zoomend', function() {
       isMapZooming = false;
-      if (routePolyline && typeof routePolyline.redraw === 'function') {
-        routePolyline.redraw();
+      if (!isProgrammaticMove) {
+        userHasInteractedWithMap = true;
       }
       if (pendingLocationUpdate) {
         const p = pendingLocationUpdate;
         pendingLocationUpdate = null;
-        window.handleLocationUpdate(p.lat, p.lng, p.accuracy, p.heading);
+        setTimeout(function() {
+          if (!isMapZooming && !isUserTouching) {
+            window.handleLocationUpdate(p.lat, p.lng, p.accuracy, p.heading);
+          }
+        }, 350);
       }
     });
-    map.on('rotatestart', disableFollowUser);
-    map.on('rotateend', function() {
-      if (routePolyline && typeof routePolyline.redraw === 'function') {
-        routePolyline.redraw();
+    map.on('rotatestart', function() {
+      if (!isProgrammaticMove) {
+        userHasInteractedWithMap = true;
+        disableFollowUser();
       }
+    });
+    map.on('rotateend', function() {
     });
 
-    // Pastikan rute dan canvas Leaflet tetap segar & tidak hilang saat kembali dari modal foto atau aplikasi lain
+    // Pastikan rute Leaflet tetap segar & tidak hilang saat kembali dari modal foto atau aplikasi lain
     function refreshMapAndRoute() {
+      if (isMapZooming || isUserTouching) return;
       if (map && typeof map.invalidateSize === 'function') {
         map.invalidateSize(false);
       }
       if (lastRoadPoints && lastRoadPoints.length > 0 && isRouteVisible) {
-        if (!routePolyline) {
-          routePolyline = L.polyline(lastRoadPoints, {
-            color: '#0284c7',
-            weight: 5,
-            opacity: 0.88,
-            lineJoin: 'round',
-            lineCap: 'round',
-            smoothFactor: 1.5,
-            renderer: routeCanvasRenderer
-          }).addTo(map);
-        } else {
-          if (!map.hasLayer(routePolyline)) {
-            routePolyline.addTo(map);
-          }
-          routePolyline.setLatLngs(lastRoadPoints);
-        }
-        if (routePolyline && typeof routePolyline.redraw === 'function') {
-          routePolyline.redraw();
-        }
+        updateRouteDisplay(lastRoadPoints);
       } else if (currentValidCustomers && currentValidCustomers.length > 0 && isRouteVisible && !isFetchingRoute) {
         fetchAndDrawRoadRoute(userGpsLat, userGpsLng, currentValidCustomers, false);
       }
+    }
+
+    // Tombol Zoom In & Zoom Out Melayang (+ / -) untuk Zoom Cepat & Super Halus
+    const btnZoomIn = document.getElementById('btn-zoom-in');
+    const btnZoomOut = document.getElementById('btn-zoom-out');
+    if (btnZoomIn) {
+      btnZoomIn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        userHasInteractedWithMap = true;
+        disableFollowUser();
+        if (map) map.zoomIn(0.5);
+      });
+    }
+    if (btnZoomOut) {
+      btnZoomOut.addEventListener('click', function(e) {
+        e.stopPropagation();
+        userHasInteractedWithMap = true;
+        disableFollowUser();
+        if (map) map.zoomOut(0.5);
+      });
     }
 
     window.refreshMapAndRoute = refreshMapAndRoute;
@@ -1352,12 +1514,12 @@ export function getMapHtml(initialCoords, customers = []) {
       }
     });
 
-    // Deteksi sentuhan multi-jari langsung pada kontainer peta
+    // Deteksi sentuhan jari langsung pada kontainer peta
     const mapEl = document.getElementById('map');
     if (mapEl) {
       mapEl.addEventListener('touchstart', function(e) {
+        isUserTouching = true;
         if (e.touches && e.touches.length > 1) {
-          isUserTouching = true;
           disableFollowUser();
         }
       }, { passive: true });
@@ -1532,9 +1694,27 @@ export function getMapHtml(initialCoords, customers = []) {
 
     // Selesai inisialisasi awal
 
+    // Inisialisasi sidik jari awal pelanggan agar update berulang tidak merender ulang peta
+    if (Array.isArray(initialCustomers)) {
+      lastCustFingerprint = initialCustomers.map(c => {
+        if (!c) return '';
+        const id = c.id || c.tagihanId || c.noSmb || '';
+        const lat = c.lat !== undefined ? c.lat : c.latitude;
+        const lng = c.lng !== undefined ? c.lng : c.longitude;
+        const foto = c.fotoPersil ? '1' : '0';
+        return id + ':' + lat + ':' + lng + ':' + foto;
+      }).join('|');
+    }
+
     // Panggil awal
     updateCoordinateInfo(currentLat, currentLng, 'Menghubungkan GPS...', 15);
-    renderRealCustomerMarkers(initialCustomers);
+    renderRealCustomerMarkers(initialCustomers, true);
+    setTimeout(function() {
+      if (typeof refreshMapAndRoute === 'function') refreshMapAndRoute();
+    }, 250);
+    setTimeout(function() {
+      if (typeof refreshMapAndRoute === 'function') refreshMapAndRoute();
+    }, 700);
   </script>
 </body>
 </html>`;
